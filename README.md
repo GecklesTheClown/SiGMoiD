@@ -4,7 +4,7 @@ SiGMoiD is a statistical approach to modelling high-dimesnional binary data insp
 
 Zhao X, Plata G, Dixit PD (2021) SiGMoiD: A super-statistical generative model for binary data. PLOS Computational Biology 17(8): e1009275. https://doi.org/10.1371/journal.pcbi.1009275
 
-In this implementation, we leverage PyTorch for fast model fitting and inference. Additionaly, we provide a model selection framework based on Akaike Information Criterion (AIC) and cross-validation. 
+In this implementation, we leverage PyTorch for fast model fitting and inference. Additionaly, we provide a model selection framework based on Akaike Information Criterion (AIC). 
 
 Please reach out if you have any questions or suggestions!
 
