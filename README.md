@@ -31,7 +31,7 @@ pip install sigmoid-py
 ## GPU Support
 This package supports GPU acceleration via PyTorch. If you have a compatible GPU and the appropriate PyTorch version installed, the package will automatically utilize the GPU for model fitting and inference. 
 
-**However, the user must install a Cuda-enabled version of PyTorch build. Please refer to the PyTorch installation guide** (https://pytorch.org/get-started/locally/).
+**However, the user must install a Cuda-enabled version of PyTorch. Please refer to the PyTorch installation guide** (https://pytorch.org/get-started/locally/).
 
 ## Quick Start
 
@@ -63,3 +63,4 @@ To ensure reproducibility, you can set the random seed when initializing the Sel
 - Add more model selection criteria (for example BIC, cross-validation with different metrics).
 - Improve model selection computational efficiency.
 - Add adaptive learning rate schedulers.
+
