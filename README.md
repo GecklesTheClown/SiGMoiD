@@ -28,6 +28,11 @@ or PyPI (coming soon).
 pip install sigmoid-py
 ```
 
+## GPU Support
+This package supports GPU acceleration via PyTorch. If you have a compatible GPU and the appropriate PyTorch version installed, the package will automatically utilize the GPU for model fitting and inference. 
+
+**However, the user must install a Cuda-enabled version of PyTorch build. Please refer to the PyTorch installation guide** (https://pytorch.org/get-started/locally/).
+
 ## Quick Start
 
 Here is a quick example of how to use SiGMoiD to fit a model to binary data.
