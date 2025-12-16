@@ -1,6 +1,6 @@
 # SiGMoiD
 
-SiGMoiD is a statistical approach to modelling high-dimesnional data inspired by statistical physics. This package is based on the paper "SiGMoiD: A super-statistical generative model for binary data", please cite the following if you use this code in your work: 
+SiGMoiD is a statistical approach to modelling high-dimesnional binary data inspired by statistical physics. This package is based on the paper "SiGMoiD: A super-statistical generative model for binary data", please cite the following if you use this code in your work: 
 
 Zhao X, Plata G, Dixit PD (2021) SiGMoiD: A super-statistical generative model for binary data. PLOS Computational Biology 17(8): e1009275. https://doi.org/10.1371/journal.pcbi.1009275
 
@@ -29,9 +29,9 @@ pip install sigmoid-py
 ```
 
 ## GPU Support
-This package supports GPU acceleration via PyTorch. If you have a compatible GPU and the appropriate PyTorch version installed, the package will automatically utilize the GPU for model fitting and inference. 
+This package supports GPU acceleration via PyTorch. If you have a compatible GPU and the appropriate PyTorch version installed, the package will automatically utilize the GPU for model fitting and inference. By default, the package will only install the CPU version of PyTorch.
 
-**However, the user must install a Cuda-enabled version of PyTorch. Please refer to the PyTorch installation guide** (https://pytorch.org/get-started/locally/).
+If you wish to use GPU acceleration, please install PyTorch with Cuda support. Instructions for installation can be found on the [PyTorch website](https://pytorch.org/get-started/locally/).
 
 ## Quick Start
 
@@ -63,4 +63,3 @@ To ensure reproducibility, you can set the random seed when initializing the Sel
 - Add more model selection criteria (for example BIC, cross-validation with different metrics).
 - Improve model selection computational efficiency.
 - Add adaptive learning rate schedulers.
-
