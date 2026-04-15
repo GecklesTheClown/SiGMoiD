@@ -9,3 +9,8 @@ wheels/
 # Virtual environments
 .venv
 uv.lock
+
+# Editor / tooling local state
+.claude/
+.idea/
+.vscode/
