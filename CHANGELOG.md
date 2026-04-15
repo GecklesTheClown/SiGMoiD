@@ -45,10 +45,17 @@ inverted forward by asserting NLL strictly decreases over training.
   train/eval mode, which downstream PyTorch packages rely on.
 - The hand-rolled gradient loop has been replaced with a standard
   `loss.backward(); optimizer.step()` autograd loop. The default optimizer is
-  `torch.optim.SGD(lr=nu)`, which produces parameter updates identical to the
-  original SiGMoiD update down to floating-point noise (~1e-8 max diff after
-  500 iterations on a toy dataset). A user-supplied `optimizer=` may be passed
-  to `fit()` to use Adam, AdamW, schedulers, etc.
+  now **`torch.optim.Adam(lr=nu)`** with `nu=0.01` (was `SGD(lr=0.001)`).
+  Rationale: on the included benchmark (`examples/bench_optimizers.py`,
+  200×60 binary data, k=4, 5 seeds) Adam at `lr=1e-2` finds a slightly lower
+  final NLL and is robust to `nu`, while SGD at the previous default
+  `lr=1e-3` is ~4× slower to converge and SGD at `lr=1e-1` diverges.
+  A user-supplied `optimizer=` may be passed to `fit()` to use SGD, AdamW,
+  schedulers, etc. **Note for throughput-conscious users:** plain
+  `SGD(lr=nu)` reaches the same plateau in roughly half the wall-time
+  (no momentum/variance state to update each step) and is mathematically
+  equivalent to the original hand-rolled SiGMoiD update — pass it explicitly
+  if you have a known-good `nu`.
 - The probability function ``sigmoid(-(beta @ energy))`` from the paper is
   preserved verbatim. The previous custom ``_sigmoid_transform`` helper has
   been removed in favour of ``torch.sigmoid(-z)``, which is identical and

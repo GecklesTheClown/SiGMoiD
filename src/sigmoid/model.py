@@ -14,13 +14,13 @@ Example:
 
     data = np.random.binomial(1, 0.5, size=(100, 50))
 
-    # Default optimizer is SGD with lr=nu
+    # Default optimizer is Adam with lr=nu (nu defaults to 1e-2)
     model = Model(data, latent_dim=5).fit(its=1000, seed=42)
 
-    # Or bring your own optimizer
+    # For higher throughput, bring your own SGD (faster per step but brittle to nu):
     import torch
     model = Model(data, latent_dim=5)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    opt = torch.optim.SGD(model.parameters(), lr=1e-2)
     model.fit(its=500, optimizer=opt, seed=42)
 
     aic_value = model.aic()
@@ -142,7 +142,7 @@ class Model(nn.Module):
 
     def fit(
         self,
-        nu: float = 0.001,
+        nu: float = 0.01,
         its: int = 2000,
         seed: int | None = None,
         gpu: bool = True,
@@ -153,18 +153,26 @@ class Model(nn.Module):
         """Fit the model by minimizing the summed binary cross-entropy.
 
         Equivalent to maximizing the log-likelihood of the binary data under
-        ``p_ij = sigmoid((beta @ energy)_ij)``.
+        the SiGMoiD probability ``p = sigmoid(-(beta @ energy))``.
 
         Args:
-            nu: Learning rate used by the default :class:`~torch.optim.SGD`
+            nu: Learning rate used by the default :class:`~torch.optim.Adam`
                 optimizer. Ignored if ``optimizer`` is supplied.
             its: Number of optimizer steps.
             seed: If given, seeds parameter re-initialization for reproducibility.
             gpu: Use CUDA if available.
             optimizer: Optional pre-built optimizer over ``self.parameters()``.
-                If ``None``, defaults to ``torch.optim.SGD(self.parameters(), lr=nu)``,
-                which is mathematically equivalent to the original SiGMoiD
-                gradient-based update.
+                If ``None``, defaults to ``torch.optim.Adam(self.parameters(), lr=nu)``.
+                Adam is the default because it's robust to ``nu`` choice and
+                tends to find a slightly lower NLL on typical SiGMoiD problems.
+                On benchmarks (``examples/bench_optimizers.py``), well-tuned
+                ``SGD(lr=nu)`` reaches the same plateau in roughly half the
+                wall-time (no momentum/variance state to update each step) but
+                is brittle to ``nu`` -- too high a value diverges. If you have
+                a known-good ``nu`` and care about throughput, pass
+                ``optimizer=torch.optim.SGD(model.parameters(), lr=nu)``
+                explicitly. SGD with the same step size is also mathematically
+                equivalent to the original hand-rolled SiGMoiD update.
             track_loss: If True, append the NLL of every iteration to
                 ``self.loss_history`` (small per-iteration overhead).
             verbose: If True, log progress roughly every 10% of iterations.
@@ -177,7 +185,7 @@ class Model(nn.Module):
         self._reinit_params(seed=seed)
 
         if optimizer is None:
-            optimizer = torch.optim.SGD(self.parameters(), lr=nu)
+            optimizer = torch.optim.Adam(self.parameters(), lr=nu)
         else:
             # Sanity-check that the supplied optimizer is actually wired to our params.
             opt_param_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
