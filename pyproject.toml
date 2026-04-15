@@ -32,8 +32,10 @@ dev = [
     "pytest-cov",
     "ruff",
     "mypy",
+    "geoopt>=0.5",
 ]
 pandas = ["pandas>=2.0"]
+geometry = ["geoopt>=0.5"]
 
 [project.urls]
 Homepage = "https://github.com/GecklesTheClown/SiGMoiD"

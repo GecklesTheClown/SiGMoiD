@@ -100,6 +100,47 @@ model.fit(its=500, optimizer=opt, seed=42)
 `SGD(lr=nu)` is also mathematically equivalent to the original hand-rolled
 SiGMoiD update (down to floating-point noise).
 
+## Constrained parameter learning (Stiefel manifold)
+
+The `beta @ energy` factorization has a rotational gauge ambiguity: any
+invertible `R` gives `(beta R) @ (R⁻¹ energy)` with identical likelihood. You
+can remove this ambiguity — at no cost to expressivity — by constraining `beta`
+to the **Stiefel manifold** `St(s, k) = {B ∈ R^{s×k} : Bᵀ B = I_k}`, i.e.
+orthonormal columns. Any unconstrained `beta` admits a QR decomposition
+`beta = Q R`, so `beta @ energy = Q @ (R @ energy)` with `Q` on the manifold
+and the rotation absorbed into `energy` (which is left Euclidean on purpose —
+constraining both would over-constrain the span).
+
+Requires the optional `geoopt` dependency:
+
+```bash
+pip install sigmoid-py[geometry]
+```
+
+Usage:
+
+```python
+from sigmoid import Model
+
+# beta is constrained to have orthonormal columns.
+# Default optimizer switches to geoopt.optim.RiemannianAdam, which applies
+# the Stiefel retraction after each Adam step so the constraint holds exactly.
+model = Model(data, latent_dim=5, beta_manifold="stiefel")
+model.fit(its=500, nu=5e-2, seed=42)
+
+# `total_params` (and therefore AIC) automatically uses the reduced Stiefel
+# DOF (s*k - k(k+1)/2) so model selection is fair vs. unconstrained fits.
+```
+
+Notes:
+
+- Requires `samples >= latent_dim`.
+- Use `geoopt.optim.RiemannianAdam` or `RiemannianSGD`. Supplying a plain
+  `torch.optim.Adam`/`SGD` raises a `RuntimeWarning` — the step is Euclidean,
+  so the constraint drifts.
+- **Do not** use `AdamW` with manifold parameters: its decoupled weight decay
+  shrinks towards zero, leaving the manifold.
+
 ## Model Selection
 
 `Selector.fit` trains `len(k) * repeats` candidate models and tracks each one in

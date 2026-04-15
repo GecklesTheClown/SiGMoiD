@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Stiefel-manifold constraint on `beta` (optional)
+
+`Model(..., beta_manifold="stiefel")` constrains the sample-side latent matrix
+`beta` to the Stiefel manifold `St(s, k) = {B ∈ R^{s×k} : Bᵀ B = I_k}`. This
+removes the rotational gauge ambiguity in the `beta @ energy` factorization
+without losing expressivity: any unconstrained factorization admits a QR
+decomposition `beta = Q R` with `Q ∈ St(s,k)`, so `beta @ energy = Q @ (R @
+energy)` is representable with `Q` on the manifold and the rotation absorbed
+into `energy` (which is left Euclidean — constraining both would over-constrain
+the span).
+
+- Requires the optional `geoopt` dependency: `pip install sigmoid-py[geometry]`.
+- Requires `samples >= latent_dim` (else `ValueError`).
+- When `beta_manifold="stiefel"` is set, the default optimizer switches from
+  `torch.optim.Adam` to `geoopt.optim.RiemannianAdam`, which applies the Stiefel
+  retraction after each Adam step so the constraint is preserved. `RiemannianSGD`
+  is also available from geoopt. A non-Riemannian optimizer supplied by the user
+  raises a `RuntimeWarning` (the constraint would silently drift).
+- `AdamW` is **not** appropriate for manifold-constrained parameters: decoupled
+  weight decay shrinks towards zero, leaving the manifold.
+- `Model.total_params` (and therefore `aic()`) automatically uses the reduced
+  Stiefel degrees of freedom `s·k − k(k+1)/2` (Edelman et al. 1998) so model
+  selection is fair between constrained and unconstrained fits.
+- New optional-dep group: `[project.optional-dependencies] geometry = ["geoopt>=0.5"]`.
+- Ten new tests in `tests/test_stiefel.py`, all guarded by
+  `pytest.importorskip("geoopt")` so the suite still runs without geoopt.
+
 ### Note — the SiGMoiD probability function (READ ME if touching `Model.forward`)
 
 The paper defines the per-cell probability as

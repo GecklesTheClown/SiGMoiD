@@ -17,19 +17,15 @@ Example:
     # Default optimizer is Adam with lr=nu (nu defaults to 1e-2)
     model = Model(data, latent_dim=5).fit(its=1000, seed=42)
 
-    # For higher throughput, bring your own SGD (faster per step but brittle to nu):
-    import torch
-    model = Model(data, latent_dim=5)
-    opt = torch.optim.SGD(model.parameters(), lr=1e-2)
-    model.fit(its=500, optimizer=opt, seed=42)
-
-    aic_value = model.aic()
-    samples = model.draw_samples(n_samples=10, seed=42)
+    # Constrain beta to the Stiefel manifold (orthonormal columns).
+    # Requires the optional `geoopt` dependency.
+    model = Model(data, latent_dim=5, beta_manifold="stiefel").fit(its=500, seed=42)
 """
 
 from __future__ import annotations
 
 import logging
+import warnings
 
 import numpy as np
 import torch
@@ -37,6 +33,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+# Optional geoopt support for manifold-constrained parameters. We import
+# defensively so the package works without geoopt installed.
+try:
+    import geoopt
+    from geoopt.optim.mixin import OptimMixin as _GeooptOptimMixin
+
+    _HAS_GEOOPT = True
+except ImportError:  # pragma: no cover - covered by tests that skip
+    geoopt = None  # type: ignore[assignment]
+    _GeooptOptimMixin = None  # type: ignore[assignment]
+    _HAS_GEOOPT = False
+
+
+_SUPPORTED_MANIFOLDS = ("stiefel",)
+
+
+def _require_geoopt(feature: str) -> None:
+    if not _HAS_GEOOPT:
+        raise ImportError(
+            f"{feature} requires the optional `geoopt` dependency. "
+            "Install with `pip install sigmoid-py[geometry]` or `pip install geoopt`."
+        )
 
 
 class Model(nn.Module):
@@ -50,7 +69,16 @@ class Model(nn.Module):
     latent_dim : int
         Dimensionality of the latent space (``k``).
     mean, std : float
-        Mean and standard deviation used to initialize ``beta`` and ``energy``.
+        Mean and standard deviation used to initialize ``beta`` and ``energy``
+        when no manifold constraint is applied.
+    beta_manifold : {None, "stiefel"}, optional
+        If ``"stiefel"``, constrain ``beta`` to the Stiefel manifold
+        :math:`\\mathrm{St}(s, k) = \\{ B \\in \\mathbb{R}^{s \\times k} :
+        B^\\top B = I_k \\}`. Requires ``s >= k`` and the optional ``geoopt``
+        dependency. Removes rotational ambiguity in the latent space without
+        losing expressivity (any unconstrained factorization ``beta @ energy``
+        can be rewritten as ``Q @ (R @ energy)`` via QR decomposition, with
+        ``Q`` on the Stiefel manifold).
 
     Attributes
     ----------
@@ -58,7 +86,7 @@ class Model(nn.Module):
         Float buffer holding the data (registered so ``.to(device)`` moves it).
     k : int
         Latent dimension.
-    beta : nn.Parameter
+    beta : nn.Parameter or geoopt.ManifoldParameter
         Sample-side latent matrix of shape ``(samples, k)``.
     energy : nn.Parameter
         Feature-side latent matrix of shape ``(k, features)``.
@@ -72,13 +100,39 @@ class Model(nn.Module):
         latent_dim: int,
         mean: float = 0.0,
         std: float = 0.01,
+        beta_manifold: str | None = None,
     ) -> None:
         super().__init__()
         self.register_buffer("raw", torch.from_numpy(np.asarray(data)).float())
         self.k = int(latent_dim)
         s, i = self.raw.shape
-        self.beta = nn.Parameter(torch.empty(s, self.k).normal_(mean, std))
+
+        if beta_manifold is not None and beta_manifold not in _SUPPORTED_MANIFOLDS:
+            raise ValueError(
+                f"Unknown beta_manifold={beta_manifold!r}. "
+                f"Supported: {_SUPPORTED_MANIFOLDS} or None."
+            )
+        self.beta_manifold = beta_manifold
+
+        if beta_manifold == "stiefel":
+            _require_geoopt("beta_manifold='stiefel'")
+            if s < self.k:
+                raise ValueError(
+                    f"Stiefel manifold for beta requires samples >= latent_dim "
+                    f"(got samples={s}, latent_dim={self.k})."
+                )
+            stiefel = geoopt.Stiefel()
+            self.beta = geoopt.ManifoldParameter(
+                stiefel.random(s, self.k), manifold=stiefel
+            )
+        else:
+            self.beta = nn.Parameter(torch.empty(s, self.k).normal_(mean, std))
+
+        # Energy is always Euclidean. Putting it on Stiefel too would overconstrain
+        # the span of `beta @ energy`; leaving it free absorbs any scale/rotation
+        # that the Stiefel gauge-fix on beta pushes out.
         self.energy = nn.Parameter(torch.empty(self.k, i).normal_(mean, std))
+
         self._init_mean = mean
         self._init_std = std
         self._fitted = False
@@ -88,9 +142,20 @@ class Model(nn.Module):
 
     @property
     def total_params(self) -> int:
-        """Total number of trainable parameters in the model."""
+        """Effective number of free parameters (used in AIC).
+
+        For an unconstrained ``beta`` this is ``s*k + k*i``. When ``beta`` is
+        constrained to the Stiefel manifold, its effective dimension drops to
+        ``s*k - k*(k+1)/2`` (see Edelman et al. 1998), and the AIC adjusts
+        accordingly so that model selection is fair between constrained and
+        unconstrained fits.
+        """
         s, i = self.raw.shape
-        return s * self.k + self.k * i
+        if self.beta_manifold == "stiefel":
+            beta_dof = s * self.k - self.k * (self.k + 1) // 2
+        else:
+            beta_dof = s * self.k
+        return beta_dof + self.k * i
 
     # ------------------------------------------------------------------ forward
 
@@ -137,8 +202,52 @@ class Model(nn.Module):
         if seed is not None:
             torch.manual_seed(seed)
         with torch.no_grad():
-            self.beta.normal_(self._init_mean, self._init_std)
+            if self.beta_manifold == "stiefel":
+                # Sample a fresh point on the Stiefel manifold.
+                assert _HAS_GEOOPT  # guaranteed by __init__
+                new_beta = self.beta.manifold.random(*self.beta.shape).to(self.beta.device)
+                self.beta.copy_(new_beta)
+            else:
+                self.beta.normal_(self._init_mean, self._init_std)
             self.energy.normal_(self._init_mean, self._init_std)
+
+    def _default_optimizer(self, nu: float) -> torch.optim.Optimizer:
+        """Pick an appropriate default optimizer for our parameters."""
+        if self.beta_manifold is not None:
+            _require_geoopt("default optimizer for manifold-constrained beta")
+            # RiemannianAdam handles mixed Euclidean + manifold params: it
+            # applies the manifold's retraction to ManifoldParameters and
+            # falls back to a standard Adam step for plain nn.Parameters.
+            return geoopt.optim.RiemannianAdam(self.parameters(), lr=nu)
+        return torch.optim.Adam(self.parameters(), lr=nu)
+
+    def _validate_user_optimizer(self, optimizer: torch.optim.Optimizer) -> None:
+        """Check that a user-supplied optimizer is compatible with our params."""
+        opt_param_ids = {id(p) for g in optimizer.param_groups for p in g["params"]}
+        for p in self.parameters():
+            if id(p) not in opt_param_ids:
+                raise ValueError(
+                    "Supplied optimizer does not track all model parameters. "
+                    "Build it after constructing the Model: "
+                    "`opt = MyOpt(model.parameters(), ...)`."
+                )
+        # If beta lives on a manifold, a non-Riemannian optimizer will silently
+        # drift off the manifold. Warn loudly.
+        if (
+            self.beta_manifold is not None
+            and _HAS_GEOOPT
+            and not isinstance(optimizer, _GeooptOptimMixin)
+        ):
+            warnings.warn(
+                "Model was constructed with beta_manifold="
+                f"{self.beta_manifold!r} but the supplied optimizer "
+                f"({type(optimizer).__name__}) is not a geoopt Riemannian "
+                "optimizer. The manifold constraint on `beta` will drift "
+                "during training. Use geoopt.optim.RiemannianAdam or "
+                "geoopt.optim.RiemannianSGD instead.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
     def fit(
         self,
@@ -156,25 +265,28 @@ class Model(nn.Module):
         the SiGMoiD probability ``p = sigmoid(-(beta @ energy))``.
 
         Args:
-            nu: Learning rate used by the default :class:`~torch.optim.Adam`
-                optimizer. Ignored if ``optimizer`` is supplied.
+            nu: Learning rate used by the default optimizer. Ignored if
+                ``optimizer`` is supplied.
             its: Number of optimizer steps.
             seed: If given, seeds parameter re-initialization for reproducibility.
             gpu: Use CUDA if available.
             optimizer: Optional pre-built optimizer over ``self.parameters()``.
-                If ``None``, defaults to ``torch.optim.Adam(self.parameters(), lr=nu)``.
-                Adam is the default because it's robust to ``nu`` choice and
-                tends to find a slightly lower NLL on typical SiGMoiD problems.
-                On benchmarks (``examples/bench_optimizers.py``), well-tuned
-                ``SGD(lr=nu)`` reaches the same plateau in roughly half the
-                wall-time (no momentum/variance state to update each step) but
-                is brittle to ``nu`` -- too high a value diverges. If you have
-                a known-good ``nu`` and care about throughput, pass
-                ``optimizer=torch.optim.SGD(model.parameters(), lr=nu)``
-                explicitly. SGD with the same step size is also mathematically
-                equivalent to the original hand-rolled SiGMoiD update.
+                Defaults depend on whether ``beta`` is manifold-constrained:
+
+                * Unconstrained: :class:`torch.optim.Adam` (``lr=nu``). Robust
+                  to ``nu`` and slightly better final NLL than SGD on typical
+                  problems. Plain ``SGD(lr=nu)`` is ~2x faster per iteration
+                  and mathematically equivalent to the original hand-rolled
+                  SiGMoiD update, if you have a known-good ``nu``.
+                * Stiefel-constrained ``beta``:
+                  :class:`geoopt.optim.RiemannianAdam` (``lr=nu``), which
+                  applies the Stiefel retraction after each Adam step so the
+                  constraint is preserved. ``RiemannianSGD`` is the other
+                  geoopt-provided option. ``AdamW`` is not appropriate for
+                  manifold-constrained parameters because decoupled weight
+                  decay shrinks towards zero, leaving the manifold.
             track_loss: If True, append the NLL of every iteration to
-                ``self.loss_history`` (small per-iteration overhead).
+                ``self.loss_history``.
             verbose: If True, log progress roughly every 10% of iterations.
 
         Returns:
@@ -185,17 +297,9 @@ class Model(nn.Module):
         self._reinit_params(seed=seed)
 
         if optimizer is None:
-            optimizer = torch.optim.Adam(self.parameters(), lr=nu)
+            optimizer = self._default_optimizer(nu)
         else:
-            # Sanity-check that the supplied optimizer is actually wired to our params.
-            opt_param_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
-            for p in self.parameters():
-                if id(p) not in opt_param_ids:
-                    raise ValueError(
-                        "Supplied optimizer does not track all model parameters. "
-                        "Build it after constructing the Model: "
-                        "`opt = MyOpt(model.parameters(), ...)`."
-                    )
+            self._validate_user_optimizer(optimizer)
 
         sigma = self.raw
         self.loss_history = []
@@ -231,7 +335,11 @@ class Model(nn.Module):
         return float(ll)
 
     def aic(self) -> float:
-        """Akaike Information Criterion: ``2 * total_params - 2 * log_likelihood``."""
+        """Akaike Information Criterion: ``2 * total_params - 2 * log_likelihood``.
+
+        When ``beta`` is manifold-constrained, ``total_params`` already
+        accounts for the reduced degrees of freedom (see :attr:`total_params`).
+        """
         return float(2 * self.total_params - 2 * self.log_likelihood())
 
     # ------------------------------------------------------------------ sampling
