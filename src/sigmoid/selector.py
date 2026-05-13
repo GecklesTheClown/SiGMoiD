@@ -1,7 +1,7 @@
 """
 selector.py
 
-SiGMoiD model selection module, for selecting the optimal latent dimension based on AIC.
+SiGMoiD model selection module, for selecting the optimal latent dimension based on AIC or BIC.
 
 Example:
     import numpy as np
@@ -37,7 +37,8 @@ class Selector:
     optimal : model.Model
         The optimal SiGMoiD model after fitting.
     trace : list
-        List of tuples recording (latent_dim, AIC, seed) for each candidate model.
+        List of tuples recording (latent_dim, score, seed) for each candidate model,
+        where score is AIC or BIC depending on the criterion chosen at fit time.
     master_seed : int
         Seed for random number generation to ensure reproducibility.
     """
@@ -55,7 +56,15 @@ class Selector:
         self.trace = []
         self.master_seed = seed
 
-    def fit(self, k=range(1, 21), its=2000, repeats=10, gpu=True, verbose=False):
+    def fit(
+        self,
+        k=range(1, 21),
+        its=2000,
+        repeats=10,
+        gpu=True,
+        verbose=False,
+        criterion="aic",
+    ):
         """_summary_
 
         Args:
@@ -64,13 +73,18 @@ class Selector:
             repeats (int, optional): Number of repeats for each latent dimension to ensure robustness. Defaults to 10.
             gpu (bool, optional): Whether to use GPU for training if available. Defaults to True.
             verbose (bool, optional): Whether to print progress messages. Defaults to False.
+            criterion (str, optional): Model selection criterion, either "aic" or "bic". Defaults to "aic".
         """
+
+        criterion = criterion.lower()
+        if criterion not in ("aic", "bic"):
+            raise ValueError(f"criterion must be 'aic' or 'bic', got {criterion!r}")
 
         # RNG and array setup
         k_range = np.asarray(k)
         master_rng = np.random.default_rng(seed=self.master_seed)
         init_seeds = master_rng.integers(2**32 - 1, size=(len(k), repeats))
-        leading_candidate_aic = None
+        leading_score = None
 
         for i, latent_dim in enumerate(k_range):
             for j in range(repeats):
@@ -83,12 +97,9 @@ class Selector:
 
                 candidate = model.Model(self.raw, latent_dim=latent_dim)
                 candidate.train(k=latent_dim, seed=init_seeds[i, j], its=its)
-                candidate_aic = candidate.aic()
-                self.trace.append((latent_dim, candidate_aic, init_seeds[i, j]))
+                candidate_score = getattr(candidate, criterion)()
+                self.trace.append((latent_dim, candidate_score, init_seeds[i, j]))
 
-                if (
-                    leading_candidate_aic is None
-                    or candidate_aic < leading_candidate_aic
-                ):
-                    leading_candidate_aic = candidate_aic
+                if leading_score is None or candidate_score < leading_score:
+                    leading_score = candidate_score
                     self.optimal = candidate

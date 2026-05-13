@@ -77,6 +77,13 @@ class Model:
         aic = 2 * self.total_params - 2 * ll
         return aic
 
+    def bic(self):
+        """Compute Bayesian Information Criterion for the model."""
+        ll = self.log_likelihood()
+        n = self.index[0] * self.index[1]
+        bic = np.log(n) * self.total_params - 2 * ll
+        return bic
+
     def log_likelihood(self):
         """ "Compute the log-likelihood of the observed data given the model."""
         if self.prob_estimates is None:
