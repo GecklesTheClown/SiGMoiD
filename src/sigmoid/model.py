@@ -236,9 +236,8 @@ class Model(nn.Module):
 
     def bic(self) -> float:
         """Bayesian Information Criterion: ``ln(n) * total_params - 2 * log_likelihood``,
-        where ``n = samples * features`` (number of independent Bernoulli cells)."""
-        s, i = self.raw.shape
-        n = int(s) * int(i)
+        where ``n = samples`` (number of rows in the data matrix)."""
+        n = int(self.raw.shape[0])
         return float(np.log(n) * self.total_params - 2 * self.log_likelihood())
 
     # ------------------------------------------------------------------ sampling
