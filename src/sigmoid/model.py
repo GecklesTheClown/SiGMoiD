@@ -234,6 +234,13 @@ class Model(nn.Module):
         """Akaike Information Criterion: ``2 * total_params - 2 * log_likelihood``."""
         return float(2 * self.total_params - 2 * self.log_likelihood())
 
+    def bic(self) -> float:
+        """Bayesian Information Criterion: ``ln(n) * total_params - 2 * log_likelihood``,
+        where ``n = samples * features`` (number of independent Bernoulli cells)."""
+        s, i = self.raw.shape
+        n = int(s) * int(i)
+        return float(np.log(n) * self.total_params - 2 * self.log_likelihood())
+
     # ------------------------------------------------------------------ sampling
 
     def draw_samples(self, n_samples: int = 1000, seed: int | None = None) -> np.ndarray:
