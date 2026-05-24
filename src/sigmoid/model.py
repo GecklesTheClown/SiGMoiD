@@ -229,7 +229,11 @@ class Model(nn.Module):
 
         which is equivalent to ``sigmoid(-(beta @ E))`` with ``E = energy_matrix()``.
         """
-        return torch.sigmoid(-(self.beta @ self.energy_matrix()))
+        return torch.sigmoid(self._logits())
+
+    def _logits(self) -> torch.Tensor:
+        """Linear predictor before sigmoid: ``-(beta @ energy_matrix())``."""
+        return -(self.beta @ self.energy_matrix())
 
     # ------------------------------------------------------------------ derived state
 
@@ -391,8 +395,14 @@ class Model(nn.Module):
             self._validate_user_optimizer(optimizer)
 
         use_bf16 = _resolve_bf16(device, bf16)
-        forward_fn = _maybe_compile_forward(self.forward, compile_model)
-        using_compiled_forward = compile_model and forward_fn is not self.forward
+        # bf16 autocast requires BCEWithLogits; fp32 path may compile sigmoid forward.
+        if use_bf16:
+            loss_fn = _maybe_compile_forward(self._logits, compile_model)
+            loss_fn_eager = self._logits
+        else:
+            loss_fn = _maybe_compile_forward(self.forward, compile_model)
+            loss_fn_eager = self.forward
+        using_compiled_loss_fn = compile_model and loss_fn is not loss_fn_eager
 
         sigma = self.raw
         self.loss_history = []
@@ -401,9 +411,10 @@ class Model(nn.Module):
         def _forward_and_loss() -> torch.Tensor:
             if use_bf16:
                 with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    prob = forward_fn()
-                    return F.binary_cross_entropy(prob, sigma, reduction="sum")
-            prob = forward_fn()
+                    return F.binary_cross_entropy_with_logits(
+                        loss_fn(), sigma, reduction="sum"
+                    )
+            prob = loss_fn()
             return F.binary_cross_entropy(prob, sigma, reduction="sum")
 
         for it in range(its):
@@ -411,16 +422,16 @@ class Model(nn.Module):
             try:
                 loss = _forward_and_loss()
             except Exception as exc:
-                if not using_compiled_forward:
+                if not using_compiled_loss_fn:
                     raise
                 warnings.warn(
                     f"torch.compile failed ({exc!r}); falling back to eager "
-                    "forward for the remainder of this fit.",
+                    "loss evaluation for the remainder of this fit.",
                     UserWarning,
                     stacklevel=3,
                 )
-                forward_fn = self.forward
-                using_compiled_forward = False
+                loss_fn = loss_fn_eager
+                using_compiled_loss_fn = False
                 loss = _forward_and_loss()
             loss.backward()
             optimizer.step()
