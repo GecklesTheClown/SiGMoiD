@@ -41,7 +41,7 @@ def test_stiefel_bf16_and_compile_on_cpu():
     pytest.importorskip("geoopt")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model = Model(_toy_data(), latent_dim=3, beta_manifold="stiefel").fit(
+        model = Model(_toy_data(), latent_dim=3, energy_manifold="stiefel").fit(
             its=15,
             seed=0,
             gpu=False,
@@ -52,9 +52,10 @@ def test_stiefel_bf16_and_compile_on_cpu():
     assert model.loss_history[-1] < model.loss_history[0]
     msgs = [str(w.message) for w in caught]
     assert any("bf16=True has no effect on CPU" in m for m in msgs)
-    k = model.beta.shape[1]
+    e = model.energy_matrix()
+    k = e.shape[0]
     with torch.no_grad():
-        err = (model.beta.T @ model.beta - torch.eye(k)).abs().max()
+        err = (e @ e.T - torch.eye(k)).abs().max()
     assert float(err) < 1e-4
 
 
@@ -70,11 +71,12 @@ def test_bf16_cuda_smoke():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_stiefel_bf16_cuda_smoke():
     pytest.importorskip("geoopt")
-    model = Model(_toy_data(shape=(80, 20)), latent_dim=4, beta_manifold="stiefel").fit(
+    model = Model(_toy_data(shape=(80, 20)), latent_dim=4, energy_manifold="stiefel").fit(
         its=25, nu=5e-2, seed=0, gpu=True, bf16=True, track_loss=True
     )
     assert model.loss_history[-1] < model.loss_history[0]
-    k = model.beta.shape[1]
+    e = model.energy_matrix()
+    k = e.shape[0]
     with torch.no_grad():
-        err = (model.beta.T @ model.beta - torch.eye(k, device=model.beta.device)).abs().max()
+        err = (e @ e.T - torch.eye(k, device=e.device)).abs().max()
     assert float(err) < 1e-3

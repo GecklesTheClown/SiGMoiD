@@ -97,7 +97,7 @@ same loss plateau in roughly half the wall-time on the included benchmark
 model.fit(its=500, optimizer="sgd", nu=1e-2, seed=42)
 
 # Stiefel (requires geoopt)
-model = Model(data, latent_dim=5, beta_manifold="stiefel")
+model = Model(data, latent_dim=5, energy_manifold="stiefel")
 model.fit(its=500, optimizer="sgd", nu=1e-2, seed=42)
 ```
 
@@ -119,7 +119,7 @@ model.fit(its=2000, gpu=True, bf16=True, seed=42)
 model.fit(its=2000, gpu=True, compile_model=True, seed=42)
 
 # Stiefel + geoopt: same flags; retractions stay full precision
-model = Model(data, latent_dim=5, beta_manifold="stiefel")
+model = Model(data, latent_dim=5, energy_manifold="stiefel")
 model.fit(its=2000, gpu=True, bf16=True, compile_model=True, seed=42)
 ```
 
@@ -128,14 +128,12 @@ same `bf16` and `compile_model` keyword arguments.
 
 ## Constrained parameter learning (Stiefel manifold)
 
-The `beta @ energy` factorization has a rotational gauge ambiguity: any
-invertible `R` gives `(beta R) @ (R⁻¹ energy)` with identical likelihood. You
-can remove this ambiguity — at no cost to expressivity — by constraining `beta`
-to the **Stiefel manifold** `St(s, k) = {B ∈ R^{s×k} : Bᵀ B = I_k}`, i.e.
-orthonormal columns. Any unconstrained `beta` admits a QR decomposition
-`beta = Q R`, so `beta @ energy = Q @ (R @ energy)` with `Q` on the manifold
-and the rotation absorbed into `energy` (which is left Euclidean on purpose —
-constraining both would over-constrain the span).
+The `beta @ E` factorization has a rotational gauge ambiguity: any invertible
+`R` gives `(beta R) @ (R⁻¹ E)` with identical likelihood. You can remove this
+ambiguity — at no cost to expressivity — by constraining the feature-side energy
+`E ∈ R^{k×i}` to have **orthonormal rows** (`E Eᵀ = I_k`). Geoopt's Stiefel
+manifold uses column-orthonormal `(features, k)` storage (`energy_T`), with
+`E = energy_T.T` in the forward pass.
 
 Requires the optional `geoopt` dependency:
 
@@ -148,19 +146,18 @@ Usage:
 ```python
 from sigmoid import Model
 
-# beta is constrained to have orthonormal columns.
-# Default optimizer switches to geoopt.optim.RiemannianAdam, which applies
-# the Stiefel retraction after each Adam step so the constraint holds exactly.
-model = Model(data, latent_dim=5, beta_manifold="stiefel")
+# energy_T is Stiefel-constrained; beta stays Euclidean.
+# Default optimizer switches to geoopt.optim.RiemannianAdam.
+model = Model(data, latent_dim=5, energy_manifold="stiefel")
 model.fit(its=500, nu=5e-2, seed=42)
 
-# `total_params` (and therefore AIC) automatically uses the reduced Stiefel
-# DOF (s*k - k(k+1)/2) so model selection is fair vs. unconstrained fits.
+# Paper-shaped (k, features) energy: model.energy_matrix()
+# `total_params` uses reduced energy DOF: k*i - k(k+1)/2
 ```
 
 Notes:
 
-- Requires `samples >= latent_dim`.
+- Requires `features >= latent_dim`.
 - Use `geoopt.optim.RiemannianAdam` or `RiemannianSGD`. Supplying a plain
   `torch.optim.Adam`/`SGD` raises a `RuntimeWarning` — the step is Euclidean,
   so the constraint drifts.

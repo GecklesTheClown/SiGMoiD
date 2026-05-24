@@ -9,36 +9,35 @@ All notable changes to this project will be documented in this file.
 - `Model.fit(..., bf16=True)` runs the forward pass and BCE loss under CUDA
   bfloat16 autocast; parameters and optimizer steps stay in float32. Off by
   default. On CPU or unsupported GPUs, training falls back to float32 with a
-  warning. Works with `beta_manifold="stiefel"` (geoopt retractions remain
+  warning. Works with `energy_manifold="stiefel"` (geoopt retractions remain
   full precision).
 - `Model.fit(..., compile_model=True)` wraps `forward` with `torch.compile`
   for that fit call only. Off by default.
 - `Selector.fit` forwards `bf16` and `compile_model` to each candidate.
 - Tests in `tests/test_perf_opts.py`.
 
-### Added — Stiefel-manifold constraint on `beta` (optional)
+### Changed — Stiefel constraint moved from `beta` to `energy`
 
-`Model(..., beta_manifold="stiefel")` constrains the sample-side latent matrix
-`beta` to the Stiefel manifold `St(s, k) = {B ∈ R^{s×k} : Bᵀ B = I_k}`. This
-removes the rotational gauge ambiguity in the `beta @ energy` factorization
-without losing expressivity: any unconstrained factorization admits a QR
-decomposition `beta = Q R` with `Q ∈ St(s,k)`, so `beta @ energy = Q @ (R @
-energy)` is representable with `Q` on the manifold and the rotation absorbed
-into `energy` (which is left Euclidean — constraining both would over-constrain
-the span).
+`Model(..., energy_manifold="stiefel")` constrains the feature-side energy
+matrix `E ∈ R^{k×i}` to have orthonormal rows (`E Eᵀ = I_k`), stored as
+`energy_T` with shape `(features, k)` on geoopt's column-orthonormal Stiefel
+manifold. `beta` is always Euclidean. The forward pass uses `E = energy_T.T`,
+so `sigmoid(-(beta @ E))` is unchanged in shape and semantics.
+
+- **Breaking:** `beta_manifold` was removed; pass `energy_manifold="stiefel"`.
+- Requires `features >= latent_dim` (was `samples >= latent_dim`).
+- `Model.total_params` reduces the **energy** term to `k·i − k(k+1)/2`.
+- Riemannian default optimizers and warnings unchanged in spirit.
+
+### Added — Stiefel-manifold constraint on `energy` (optional)
 
 - Requires the optional `geoopt` dependency: `pip install sigmoid-py[geometry]`.
-- Requires `samples >= latent_dim` (else `ValueError`).
-- When `beta_manifold="stiefel"` is set, the default optimizer switches from
-  `torch.optim.Adam` to `geoopt.optim.RiemannianAdam`, which applies the Stiefel
-  retraction after each Adam step so the constraint is preserved. `RiemannianSGD`
-  is also available from geoopt. A non-Riemannian optimizer supplied by the user
-  raises a `RuntimeWarning` (the constraint would silently drift).
-- `AdamW` is **not** appropriate for manifold-constrained parameters: decoupled
-  weight decay shrinks towards zero, leaving the manifold.
-- `Model.total_params` (and therefore `aic()`) automatically uses the reduced
-  Stiefel degrees of freedom `s·k − k(k+1)/2` (Edelman et al. 1998) so model
-  selection is fair between constrained and unconstrained fits.
+- When `energy_manifold="stiefel"` is set, the default optimizer switches from
+  `torch.optim.Adam` to `geoopt.optim.RiemannianAdam`. `RiemannianSGD` is also
+  available (`optimizer="sgd"`). A non-Riemannian optimizer raises a
+  `RuntimeWarning` (the constraint would drift).
+- `AdamW` is **not** appropriate for manifold-constrained parameters.
+- `Model.energy_matrix()` returns the paper-shaped `(k, features)` view.
 - New optional-dep group: `[project.optional-dependencies] geometry = ["geoopt>=0.5"]`.
 - Ten new tests in `tests/test_stiefel.py`, all guarded by
   `pytest.importorskip("geoopt")` so the suite still runs without geoopt.

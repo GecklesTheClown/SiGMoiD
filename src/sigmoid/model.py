@@ -17,9 +17,9 @@ Example:
     # Default optimizer is Adam with lr=nu (nu defaults to 1e-2)
     model = Model(data, latent_dim=5).fit(its=1000, seed=42)
 
-    # Constrain beta to the Stiefel manifold (orthonormal columns).
+    # Constrain energy to the Stiefel manifold (orthonormal rows in feature space).
     # Requires the optional `geoopt` dependency.
-    model = Model(data, latent_dim=5, beta_manifold="stiefel").fit(its=500, seed=42)
+    model = Model(data, latent_dim=5, energy_manifold="stiefel").fit(its=500, seed=42)
 """
 
 from __future__ import annotations
@@ -111,16 +111,15 @@ class Model(nn.Module):
     latent_dim : int
         Dimensionality of the latent space (``k``).
     mean, std : float
-        Mean and standard deviation used to initialize ``beta`` and ``energy``
-        when no manifold constraint is applied.
-    beta_manifold : {None, "stiefel"}, optional
-        If ``"stiefel"``, constrain ``beta`` to the Stiefel manifold
-        :math:`\\mathrm{St}(s, k) = \\{ B \\in \\mathbb{R}^{s \\times k} :
-        B^\\top B = I_k \\}`. Requires ``s >= k`` and the optional ``geoopt``
-        dependency. Removes rotational ambiguity in the latent space without
-        losing expressivity (any unconstrained factorization ``beta @ energy``
-        can be rewritten as ``Q @ (R @ energy)`` via QR decomposition, with
-        ``Q`` on the Stiefel manifold).
+        Mean and standard deviation used to initialize ``beta`` and ``energy``.
+    energy_manifold : {None, "stiefel"}, optional
+        If ``"stiefel"``, constrain the feature-side energy matrix
+        :math:`E \\in \\mathbb{R}^{k \\times i}` to have orthonormal rows
+        (:math:`E E^\\top = I_k`). Internally stored as ``energy_T`` with shape
+        ``(features, k)`` on geoopt's column-orthonormal Stiefel manifold
+        (:math:`E^\\top E = I_k` after transpose). Requires ``features >= k``
+        and the optional ``geoopt`` dependency. Removes rotational ambiguity
+        in the ``beta @ E`` factorization without losing expressivity.
 
     Attributes
     ----------
@@ -128,10 +127,13 @@ class Model(nn.Module):
         Float buffer holding the data (registered so ``.to(device)`` moves it).
     k : int
         Latent dimension.
-    beta : nn.Parameter or geoopt.ManifoldParameter
+    beta : nn.Parameter
         Sample-side latent matrix of shape ``(samples, k)``.
     energy : nn.Parameter
-        Feature-side latent matrix of shape ``(k, features)``.
+        Feature-side matrix of shape ``(k, features)`` when unconstrained.
+    energy_T : geoopt.ManifoldParameter
+        Present when ``energy_manifold="stiefel"``; shape ``(features, k)``.
+        Use :meth:`energy_matrix` for the paper-shaped ``(k, features)`` view.
     loss_history : list[float]
         Per-iteration NLL recorded when ``fit(track_loss=True)``.
     """
@@ -142,38 +144,45 @@ class Model(nn.Module):
         latent_dim: int,
         mean: float = 0.0,
         std: float = 0.01,
+        energy_manifold: str | None = None,
+        *,
         beta_manifold: str | None = None,
     ) -> None:
         super().__init__()
+        if beta_manifold is not None:
+            raise ValueError(
+                "beta_manifold was removed. Constrain the feature-side energy "
+                "matrix with energy_manifold='stiefel' instead."
+            )
         self.register_buffer("raw", torch.from_numpy(np.asarray(data)).float())
         self.k = int(latent_dim)
         s, i = self.raw.shape
 
-        if beta_manifold is not None and beta_manifold not in _SUPPORTED_MANIFOLDS:
+        if energy_manifold is not None and energy_manifold not in _SUPPORTED_MANIFOLDS:
             raise ValueError(
-                f"Unknown beta_manifold={beta_manifold!r}. "
+                f"Unknown energy_manifold={energy_manifold!r}. "
                 f"Supported: {_SUPPORTED_MANIFOLDS} or None."
             )
-        self.beta_manifold = beta_manifold
+        self.energy_manifold = energy_manifold
 
-        if beta_manifold == "stiefel":
-            _require_geoopt("beta_manifold='stiefel'")
-            if s < self.k:
+        self.beta = nn.Parameter(torch.empty(s, self.k).normal_(mean, std))
+
+        if energy_manifold == "stiefel":
+            _require_geoopt("energy_manifold='stiefel'")
+            if i < self.k:
                 raise ValueError(
-                    f"Stiefel manifold for beta requires samples >= latent_dim "
-                    f"(got samples={s}, latent_dim={self.k})."
+                    f"Stiefel manifold for energy requires features >= latent_dim "
+                    f"(got features={i}, latent_dim={self.k})."
                 )
             stiefel = geoopt.Stiefel()
-            self.beta = geoopt.ManifoldParameter(
-                stiefel.random(s, self.k), manifold=stiefel
+            self.energy_T = geoopt.ManifoldParameter(
+                torch.empty(i, self.k).normal_(mean, std),
+                manifold=stiefel,
             )
+            with torch.no_grad():
+                self.energy_T.proj_()
         else:
-            self.beta = nn.Parameter(torch.empty(s, self.k).normal_(mean, std))
-
-        # Energy is always Euclidean. Putting it on Stiefel too would overconstrain
-        # the span of `beta @ energy`; leaving it free absorbs any scale/rotation
-        # that the Stiefel gauge-fix on beta pushes out.
-        self.energy = nn.Parameter(torch.empty(self.k, i).normal_(mean, std))
+            self.energy = nn.Parameter(torch.empty(self.k, i).normal_(mean, std))
 
         self._init_mean = mean
         self._init_std = std
@@ -182,22 +191,30 @@ class Model(nn.Module):
 
     # ------------------------------------------------------------------ shape
 
+    def energy_matrix(self) -> torch.Tensor:
+        """Energy matrix ``E`` with shape ``(k, features)`` for the forward pass.
+
+        When ``energy_manifold="stiefel"``, returns ``energy_T.T`` so that
+        ``beta @ E`` matches the paper notation.
+        """
+        if self.energy_manifold == "stiefel":
+            return self.energy_T.t()
+        return self.energy
+
     @property
     def total_params(self) -> int:
         """Effective number of free parameters (used in AIC and BIC).
 
-        For an unconstrained ``beta`` this is ``s*k + k*i``. When ``beta`` is
-        constrained to the Stiefel manifold, its effective dimension drops to
-        ``s*k - k*(k+1)/2`` (see Edelman et al. 1998), and the AIC adjusts
-        accordingly so that model selection is fair between constrained and
-        unconstrained fits.
+        Unconstrained: ``s*k + k*i``. With ``energy_manifold="stiefel"``, the
+        energy term uses ``k*i - k*(k+1)/2`` (see Edelman et al. 1998).
         """
         s, i = self.raw.shape
-        if self.beta_manifold == "stiefel":
-            beta_dof = s * self.k - self.k * (self.k + 1) // 2
+        beta_dof = s * self.k
+        if self.energy_manifold == "stiefel":
+            energy_dof = i * self.k - self.k * (self.k + 1) // 2
         else:
-            beta_dof = s * self.k
-        return beta_dof + self.k * i
+            energy_dof = self.k * i
+        return beta_dof + energy_dof
 
     # ------------------------------------------------------------------ forward
 
@@ -210,9 +227,9 @@ class Model(nn.Module):
             p_{si} = \\frac{\\exp(-\\sum_k \\beta_{sk} E_{ki})}
                           {1 + \\exp(-\\sum_k \\beta_{sk} E_{ki})}
 
-        which is equivalent to ``sigmoid(-(beta @ energy))``.
+        which is equivalent to ``sigmoid(-(beta @ E))`` with ``E = energy_matrix()``.
         """
-        return torch.sigmoid(-(self.beta @ self.energy))
+        return torch.sigmoid(-(self.beta @ self.energy_matrix()))
 
     # ------------------------------------------------------------------ derived state
 
@@ -229,12 +246,12 @@ class Model(nn.Module):
         """``[beta, energy]`` as detached CPU tensors, or ``None``."""
         if not self._fitted:
             return None
-        return [self.beta.detach().cpu(), self.energy.detach().cpu()]
+        return [self.beta.detach().cpu(), self.energy_matrix().detach().cpu()]
 
     # ------------------------------------------------------------------ training
 
     def _reinit_params(self, seed: int | None) -> None:
-        """Re-initialize ``beta`` and ``energy`` in-place.
+        """Re-initialize ``beta`` and energy parameters in-place.
 
         In-place reinit preserves the underlying ``nn.Parameter`` object
         identities, so a user-supplied optimizer built before :meth:`fit` is
@@ -244,14 +261,13 @@ class Model(nn.Module):
         if seed is not None:
             torch.manual_seed(seed)
         with torch.no_grad():
-            if self.beta_manifold == "stiefel":
-                # Sample a fresh point on the Stiefel manifold.
-                assert _HAS_GEOOPT  # guaranteed by __init__
-                new_beta = self.beta.manifold.random(*self.beta.shape).to(self.beta.device)
-                self.beta.copy_(new_beta)
+            self.beta.normal_(self._init_mean, self._init_std)
+            if self.energy_manifold == "stiefel":
+                assert _HAS_GEOOPT
+                self.energy_T.normal_(self._init_mean, self._init_std)
+                self.energy_T.proj_()
             else:
-                self.beta.normal_(self._init_mean, self._init_std)
-            self.energy.normal_(self._init_mean, self._init_std)
+                self.energy.normal_(self._init_mean, self._init_std)
 
     def _default_optimizer(
         self, nu: float, name: str = "adam"
@@ -260,7 +276,7 @@ class Model(nn.Module):
 
         Args:
             nu: Learning rate.
-            name: ``"adam"`` or ``"sgd"``. For Stiefel ``beta``, uses the
+            name: ``"adam"`` or ``"sgd"``. For Stiefel ``energy``, uses the
                 corresponding geoopt Riemannian optimizer.
         """
         key = name.lower()
@@ -268,8 +284,8 @@ class Model(nn.Module):
             raise ValueError(
                 f"optimizer must be one of {_SUPPORTED_OPTIMIZERS!r}, got {name!r}"
             )
-        if self.beta_manifold is not None:
-            _require_geoopt("default optimizer for manifold-constrained beta")
+        if self.energy_manifold is not None:
+            _require_geoopt("default optimizer for manifold-constrained energy")
             # Riemannian optimizers handle mixed Euclidean + manifold params:
             # retraction on ManifoldParameters, standard step on nn.Parameters.
             if key == "sgd":
@@ -289,18 +305,17 @@ class Model(nn.Module):
                     "Build it after constructing the Model: "
                     "`opt = MyOpt(model.parameters(), ...)`."
                 )
-        # If beta lives on a manifold, a non-Riemannian optimizer will silently
-        # drift off the manifold. Warn loudly.
+        # If energy lives on a manifold, a non-Riemannian optimizer will drift.
         if (
-            self.beta_manifold is not None
+            self.energy_manifold is not None
             and _HAS_GEOOPT
             and not isinstance(optimizer, _GeooptOptimMixin)
         ):
             warnings.warn(
-                "Model was constructed with beta_manifold="
-                f"{self.beta_manifold!r} but the supplied optimizer "
+                "Model was constructed with energy_manifold="
+                f"{self.energy_manifold!r} but the supplied optimizer "
                 f"({type(optimizer).__name__}) is not a geoopt Riemannian "
-                "optimizer. The manifold constraint on `beta` will drift "
+                "optimizer. The Stiefel constraint on `energy_T` will drift "
                 "during training. Use geoopt.optim.RiemannianAdam or "
                 "geoopt.optim.RiemannianSGD instead.",
                 RuntimeWarning,
@@ -344,7 +359,7 @@ class Model(nn.Module):
                   :class:`torch.optim.SGD` (``lr=nu``). Adam is more robust to
                   ``nu``; SGD is ~2x faster per iteration and matches the
                   original hand-rolled SiGMoiD update when ``nu`` is tuned.
-                * Stiefel-constrained ``beta``:
+                * Stiefel-constrained ``energy_T``:
                   :class:`geoopt.optim.RiemannianAdam` or
                   :class:`geoopt.optim.RiemannianSGD`. ``AdamW`` is not
                   appropriate for manifold parameters (weight decay leaves the
@@ -355,7 +370,7 @@ class Model(nn.Module):
             bf16: If True, run the forward pass and loss under CUDA bfloat16
                 autocast (parameters and optimizer steps stay in float32).
                 Ignored on CPU or when the GPU lacks bf16 support (with a
-                warning). Safe to combine with ``beta_manifold="stiefel"``;
+                warning). Safe to combine with ``energy_manifold="stiefel"``;
                 geoopt retractions still run in full precision.
             compile_model: If True, wrap :meth:`forward` with
                 :func:`torch.compile` for the duration of this fit call only.
@@ -435,7 +450,7 @@ class Model(nn.Module):
     def aic(self) -> float:
         """Akaike Information Criterion: ``2 * total_params - 2 * log_likelihood``.
 
-        When ``beta`` is manifold-constrained, ``total_params`` already
+        When ``energy`` is Stiefel-constrained, ``total_params`` already
         accounts for the reduced degrees of freedom (see :attr:`total_params`).
         """
         return float(2 * self.total_params - 2 * self.log_likelihood())
@@ -469,5 +484,6 @@ class Model(nn.Module):
         indices = rng.integers(s, size=n_samples)
         with torch.no_grad():
             sample_betas = self.beta[indices]
-            prob = torch.sigmoid(-(sample_betas @ self.energy)).detach().cpu().numpy()
+            e = self.energy_matrix()
+            prob = torch.sigmoid(-(sample_betas @ e)).detach().cpu().numpy()
         return rng.binomial(1, prob)
