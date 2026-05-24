@@ -82,24 +82,29 @@ torch.save(model.state_dict(), "sigmoid_weights.pt")
 
 ### Default optimizer
 
-If `optimizer` is omitted, `fit` uses `torch.optim.Adam(lr=nu)` (with
-`nu=0.01` by default). Adam is the default because it is robust to the choice
-of `nu` and tends to find a slightly lower NLL on typical SiGMoiD problems.
+If `optimizer` is omitted, `fit` uses Adam (`optimizer="adam"`, `nu=0.01` by
+default). Adam is robust to the choice of `nu` and tends to find a slightly
+lower NLL on typical SiGMoiD problems.
 
-**Want faster training?** Plain `SGD(lr=nu)` reaches the same loss plateau in
-roughly half the wall-time on the included benchmark
-(`examples/bench_optimizers.py`) — there's no momentum/variance state to
-update each step. The catch: SGD is brittle to `nu`. Too high a value
-(`>= 0.1` on a typical problem) diverges. If you have a known-good `nu` and
-care about throughput, pass it in:
+**Want faster training?** Pass `optimizer="sgd"` (or build your own
+`torch.optim.SGD` / `geoopt.optim.RiemannianSGD` for Stiefel). SGD reaches the
+same loss plateau in roughly half the wall-time on the included benchmark
+(`examples/bench_optimizers.py`). The catch: SGD is brittle to `nu` — values
+`>= 0.1` on a typical problem often diverge.
 
 ```python
-opt = torch.optim.SGD(model.parameters(), lr=1e-2)
-model.fit(its=500, optimizer=opt, seed=42)
+# Euclidean
+model.fit(its=500, optimizer="sgd", nu=1e-2, seed=42)
+
+# Stiefel (requires geoopt)
+model = Model(data, latent_dim=5, beta_manifold="stiefel")
+model.fit(its=500, optimizer="sgd", nu=1e-2, seed=42)
 ```
 
-`SGD(lr=nu)` is also mathematically equivalent to the original hand-rolled
-SiGMoiD update (down to floating-point noise).
+String `optimizer="sgd"` is mathematically equivalent to the original
+hand-rolled SiGMoiD update (down to floating-point noise). You can still pass a
+custom pre-built optimizer instance for full control (momentum, weight decay,
+schedulers, etc.).
 
 ### Optional CUDA speed-ups (`bf16`, `torch.compile`)
 

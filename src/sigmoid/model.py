@@ -48,6 +48,7 @@ except ImportError:  # pragma: no cover - covered by tests that skip
 
 
 _SUPPORTED_MANIFOLDS = ("stiefel",)
+_SUPPORTED_OPTIMIZERS = ("adam", "sgd")
 
 
 def _require_geoopt(feature: str) -> None:
@@ -252,14 +253,30 @@ class Model(nn.Module):
                 self.beta.normal_(self._init_mean, self._init_std)
             self.energy.normal_(self._init_mean, self._init_std)
 
-    def _default_optimizer(self, nu: float) -> torch.optim.Optimizer:
-        """Pick an appropriate default optimizer for our parameters."""
+    def _default_optimizer(
+        self, nu: float, name: str = "adam"
+    ) -> torch.optim.Optimizer:
+        """Build a default optimizer for our parameters.
+
+        Args:
+            nu: Learning rate.
+            name: ``"adam"`` or ``"sgd"``. For Stiefel ``beta``, uses the
+                corresponding geoopt Riemannian optimizer.
+        """
+        key = name.lower()
+        if key not in _SUPPORTED_OPTIMIZERS:
+            raise ValueError(
+                f"optimizer must be one of {_SUPPORTED_OPTIMIZERS!r}, got {name!r}"
+            )
         if self.beta_manifold is not None:
             _require_geoopt("default optimizer for manifold-constrained beta")
-            # RiemannianAdam handles mixed Euclidean + manifold params: it
-            # applies the manifold's retraction to ManifoldParameters and
-            # falls back to a standard Adam step for plain nn.Parameters.
+            # Riemannian optimizers handle mixed Euclidean + manifold params:
+            # retraction on ManifoldParameters, standard step on nn.Parameters.
+            if key == "sgd":
+                return geoopt.optim.RiemannianSGD(self.parameters(), lr=nu)
             return geoopt.optim.RiemannianAdam(self.parameters(), lr=nu)
+        if key == "sgd":
+            return torch.optim.SGD(self.parameters(), lr=nu)
         return torch.optim.Adam(self.parameters(), lr=nu)
 
     def _validate_user_optimizer(self, optimizer: torch.optim.Optimizer) -> None:
@@ -296,7 +313,7 @@ class Model(nn.Module):
         its: int = 2000,
         seed: int | None = None,
         gpu: bool = True,
-        optimizer: torch.optim.Optimizer | None = None,
+        optimizer: str | torch.optim.Optimizer | None = None,
         track_loss: bool = False,
         verbose: bool = False,
         bf16: bool = False,
@@ -308,26 +325,30 @@ class Model(nn.Module):
         the SiGMoiD probability ``p = sigmoid(-(beta @ energy))``.
 
         Args:
-            nu: Learning rate used by the default optimizer. Ignored if
-                ``optimizer`` is supplied.
+            nu: Learning rate used when ``optimizer`` is omitted or a string.
+                Ignored if a pre-built optimizer instance is supplied.
             its: Number of optimizer steps.
             seed: If given, seeds parameter re-initialization for reproducibility.
             gpu: Use CUDA if available.
-            optimizer: Optional pre-built optimizer over ``self.parameters()``.
-                Defaults depend on whether ``beta`` is manifold-constrained:
+            optimizer: How to optimize. Three forms:
 
-                * Unconstrained: :class:`torch.optim.Adam` (``lr=nu``). Robust
-                  to ``nu`` and slightly better final NLL than SGD on typical
-                  problems. Plain ``SGD(lr=nu)`` is ~2x faster per iteration
-                  and mathematically equivalent to the original hand-rolled
-                  SiGMoiD update, if you have a known-good ``nu``.
+                * ``None`` (default): ``"adam"``.
+                * ``"adam"`` or ``"sgd"``: build the default optimizer for the
+                  current parameterization (Euclidean or Stiefel).
+                * A pre-built :class:`torch.optim.Optimizer` over
+                  ``self.parameters()`` (full control over type and hyperparams).
+
+                Defaults when a string is used:
+
+                * Unconstrained: :class:`torch.optim.Adam` or
+                  :class:`torch.optim.SGD` (``lr=nu``). Adam is more robust to
+                  ``nu``; SGD is ~2x faster per iteration and matches the
+                  original hand-rolled SiGMoiD update when ``nu`` is tuned.
                 * Stiefel-constrained ``beta``:
-                  :class:`geoopt.optim.RiemannianAdam` (``lr=nu``), which
-                  applies the Stiefel retraction after each Adam step so the
-                  constraint is preserved. ``RiemannianSGD`` is the other
-                  geoopt-provided option. ``AdamW`` is not appropriate for
-                  manifold-constrained parameters because decoupled weight
-                  decay shrinks towards zero, leaving the manifold.
+                  :class:`geoopt.optim.RiemannianAdam` or
+                  :class:`geoopt.optim.RiemannianSGD`. ``AdamW`` is not
+                  appropriate for manifold parameters (weight decay leaves the
+                  manifold).
             track_loss: If True, append the NLL of every iteration to
                 ``self.loss_history``.
             verbose: If True, log progress roughly every 10% of iterations.
@@ -348,8 +369,9 @@ class Model(nn.Module):
         self.to(device)
         self._reinit_params(seed=seed)
 
-        if optimizer is None:
-            optimizer = self._default_optimizer(nu)
+        if optimizer is None or isinstance(optimizer, str):
+            name = "adam" if optimizer is None else optimizer
+            optimizer = self._default_optimizer(nu, name)
         else:
             self._validate_user_optimizer(optimizer)
 

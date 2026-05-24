@@ -111,6 +111,29 @@ def test_training_actually_minimizes_nll():
     assert m.log_likelihood() > chance
 
 
+@pytest.mark.parametrize(
+    "name,cls",
+    [("adam", torch.optim.Adam), ("sgd", torch.optim.SGD)],
+)
+def test_optimizer_string_builds_expected_class(name, cls):
+    model = Model(_toy_data(), latent_dim=2)
+    opt = model._default_optimizer(1e-2, name)
+    assert isinstance(opt, cls)
+
+
+def test_fit_with_optimizer_sgd_string():
+    data = _toy_data()
+    m = Model(data, latent_dim=3).fit(
+        its=80, nu=5e-2, optimizer="sgd", seed=0, gpu=False, track_loss=True
+    )
+    assert m.loss_history[-1] < m.loss_history[0]
+
+
+def test_invalid_optimizer_string_raises():
+    with pytest.raises(ValueError, match="optimizer must be"):
+        Model(_toy_data(), latent_dim=2).fit(its=5, optimizer="rmsprop", gpu=False)
+
+
 def test_custom_optimizer_is_accepted():
     data = _toy_data()
     model = Model(data, latent_dim=3)

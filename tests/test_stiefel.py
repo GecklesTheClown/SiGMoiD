@@ -40,6 +40,26 @@ def test_stiefel_default_optimizer_is_riemannian():
     assert isinstance(opt, geoopt.optim.RiemannianAdam)
 
 
+@pytest.mark.parametrize(
+    "name,cls",
+    [
+        ("adam", geoopt.optim.RiemannianAdam),
+        ("sgd", geoopt.optim.RiemannianSGD),
+    ],
+)
+def test_stiefel_optimizer_string(name, cls):
+    model = Model(_toy_data(), latent_dim=3, beta_manifold="stiefel")
+    opt = model._default_optimizer(1e-2, name)
+    assert isinstance(opt, cls)
+
+
+def test_stiefel_fit_with_optimizer_sgd_string():
+    model = Model(_toy_data(), latent_dim=4, beta_manifold="stiefel")
+    model.fit(its=80, nu=5e-2, optimizer="sgd", seed=0, gpu=False, track_loss=True)
+    assert model.loss_history[-1] < model.loss_history[0]
+    assert _orthonormality_error(model.beta) < 1e-4
+
+
 def test_stiefel_constraint_preserved_after_training():
     model = Model(_toy_data(), latent_dim=4, beta_manifold="stiefel")
     model.fit(its=80, nu=5e-2, seed=0, gpu=False, track_loss=True)
