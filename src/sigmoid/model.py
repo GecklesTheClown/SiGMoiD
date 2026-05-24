@@ -142,7 +142,7 @@ class Model(nn.Module):
 
     @property
     def total_params(self) -> int:
-        """Effective number of free parameters (used in AIC).
+        """Effective number of free parameters (used in AIC and BIC).
 
         For an unconstrained ``beta`` this is ``s*k + k*i``. When ``beta`` is
         constrained to the Stiefel manifold, its effective dimension drops to
@@ -341,6 +341,15 @@ class Model(nn.Module):
         accounts for the reduced degrees of freedom (see :attr:`total_params`).
         """
         return float(2 * self.total_params - 2 * self.log_likelihood())
+
+    def bic(self) -> float:
+        """Bayesian Information Criterion: ``ln(n) * total_params - 2 * log_likelihood``.
+
+        Here ``n`` is the number of samples (rows in the data matrix). Uses the
+        same :attr:`total_params` as :meth:`aic`, including Stiefel reductions.
+        """
+        n = int(self.raw.shape[0])
+        return float(np.log(n) * self.total_params - 2 * self.log_likelihood())
 
     # ------------------------------------------------------------------ sampling
 

@@ -1,7 +1,7 @@
 """
 selector.py
 
-SiGMoiD model selection module, for selecting the optimal latent dimension based on AIC.
+SiGMoiD model selection module, for selecting the optimal latent dimension based on AIC or BIC.
 
 Example:
     import numpy as np
@@ -42,12 +42,15 @@ class Selector:
     optimal : Optional[Model]
         The optimal SiGMoiD model after fitting.
     trace : list[tuple[int, float, int]]
-        List of tuples recording (latent_dim, AIC, seed) for each candidate model.
+        List of tuples recording (latent_dim, score, seed) for each candidate model,
+        where score is AIC or BIC depending on the criterion chosen at fit time.
     candidates : dict[tuple[int, int], Model]
         All trained candidates keyed by ``(latent_dim, seed)``. Populated only when
         ``keep_all=True`` is passed to :meth:`fit`.
     master_seed : Optional[int]
         Seed for random number generation to ensure reproducibility.
+    criterion : str
+        ``"aic"`` or ``"bic"``; set by the most recent call to :meth:`fit`.
     """
 
     def __init__(self, data: np.ndarray, seed: int | None = None) -> None:
@@ -62,6 +65,7 @@ class Selector:
         self.trace: list[tuple[int, float, int]] = []
         self.candidates: dict[tuple[int, int], Model] = {}
         self.master_seed = seed
+        self.criterion: str = "aic"
 
     def fit(
         self,
@@ -71,8 +75,9 @@ class Selector:
         gpu: bool = True,
         verbose: bool = False,
         keep_all: bool = False,
+        criterion: str = "aic",
     ) -> Selector:
-        """Fit candidate models across latent dimensions and select the best by AIC.
+        """Fit candidate models across latent dimensions and select the best by AIC or BIC.
 
         Args:
             k: Range or iterable of latent dimensions to evaluate.
@@ -82,15 +87,22 @@ class Selector:
             verbose: If True, log progress per candidate.
             keep_all: If True, retain every trained candidate in ``self.candidates``.
                 If False (default), only the running best is kept to save memory.
+            criterion: Model selection criterion, either ``"aic"`` or ``"bic"``.
+                Defaults to ``"aic"``.
 
         Returns:
             self, for chaining.
         """
+        criterion = criterion.lower()
+        if criterion not in ("aic", "bic"):
+            raise ValueError(f"criterion must be 'aic' or 'bic', got {criterion!r}")
+        self.criterion = criterion
+
         # Materialize k so we can re-use it and know its length.
         k_range = np.asarray(list(k))
         master_rng = np.random.default_rng(seed=self.master_seed)
         init_seeds = master_rng.integers(2**32 - 1, size=(len(k_range), repeats))
-        leading_candidate_aic: float | None = None
+        leading_score: float | None = None
         total = len(k_range) * repeats
         done = 0
 
@@ -112,14 +124,14 @@ class Selector:
 
                 candidate = Model(self.raw, latent_dim=int(latent_dim))
                 candidate.fit(seed=seed, its=its, gpu=gpu)
-                candidate_aic = candidate.aic()
-                self.trace.append((int(latent_dim), candidate_aic, seed))
+                candidate_score = getattr(candidate, criterion)()
+                self.trace.append((int(latent_dim), candidate_score, seed))
 
                 if keep_all:
                     self.candidates[(int(latent_dim), seed)] = candidate
 
-                if leading_candidate_aic is None or candidate_aic < leading_candidate_aic:
-                    leading_candidate_aic = candidate_aic
+                if leading_score is None or candidate_score < leading_score:
+                    leading_score = candidate_score
                     self.optimal = candidate
 
         return self
@@ -136,4 +148,4 @@ class Selector:
                 "trace_df() requires pandas. Install with `pip install pandas`."
             ) from exc
 
-        return pd.DataFrame(self.trace, columns=["latent_dim", "aic", "seed"])
+        return pd.DataFrame(self.trace, columns=["latent_dim", self.criterion, "seed"])

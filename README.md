@@ -4,7 +4,7 @@ SiGMoiD is a statistical approach to modelling high-dimensional binary data insp
 
 > Zhao X, Plata G, Dixit PD (2021) SiGMoiD: A super-statistical generative model for binary data. *PLOS Computational Biology* 17(8): e1009275. https://doi.org/10.1371/journal.pcbi.1009275
 
-In this implementation, we leverage PyTorch for fast model fitting and inference. We also provide a model-selection framework based on Akaike Information Criterion (AIC).
+In this implementation, we leverage PyTorch for fast model fitting and inference. We also provide a model-selection framework based on Akaike Information Criterion (AIC) or Bayesian Information Criterion (BIC).
 
 Please reach out if you have any questions or suggestions!
 
@@ -45,8 +45,9 @@ data = pd.read_csv("your_binary_data.csv").to_numpy()
 
 # Initialize the model selector
 selector = Selector(data, seed=42)
-# Select the best model based on AIC
+# Select the best model (AIC by default; pass criterion="bic" for BIC)
 selector.fit(k=range(1, 21), repeats=10)
+# selector.fit(k=range(1, 21), repeats=10, criterion="bic")
 model = selector.optimal
 
 # Draw samples from the optimal fitted model
@@ -144,7 +145,8 @@ Notes:
 ## Model Selection
 
 `Selector.fit` trains `len(k) * repeats` candidate models and tracks each one in
-`selector.trace` as `(latent_dim, aic, seed)` tuples. If pandas is installed you
+`selector.trace` as `(latent_dim, score, seed)` tuples, where `score` is AIC or
+BIC depending on the `criterion` passed to `fit`. If pandas is installed you
 can call `selector.trace_df()` for a tabular view. Pass `keep_all=True` to
 retain every candidate in `selector.candidates` (keyed by
 `(latent_dim, seed)`); by default only the running best is retained to save
@@ -158,11 +160,11 @@ Set the `seed` argument on `Selector` or `Model` for deterministic behaviour. Ea
 
 - Input data must be `{0, 1}`-valued. Any numpy dtype is accepted; values are cast to float internally.
 - Memory scales as `O(s*k + k*i)` where `s` is the number of samples, `i` the number of features, and `k` the latent dimension.
-- Model selection currently uses AIC only. BIC and cross-validation are on the roadmap.
+- Model selection supports AIC and BIC; cross-validation is on the roadmap.
 
 ## Roadmap
 
-- More model selection criteria (e.g. BIC, cross-validation with different metrics).
+- More model selection criteria (e.g. cross-validation with different metrics).
 - Improved model selection computational efficiency.
 - Adaptive learning-rate schedulers.
 

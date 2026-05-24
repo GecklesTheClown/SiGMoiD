@@ -1,6 +1,7 @@
 """Smoke tests for the Selector interface."""
 
 import numpy as np
+import pytest
 
 from sigmoid import Model, Selector
 
@@ -24,6 +25,23 @@ def test_trace_records_lat_dim_aic_seed():
         assert latent_dim in (1, 2)
         assert isinstance(aic, float)
         assert isinstance(seed, int)
+
+
+def test_fit_with_bic_criterion():
+    data = _toy_data()
+    sel = Selector(data, seed=1).fit(
+        k=[1, 2], its=10, repeats=1, gpu=False, criterion="bic"
+    )
+    assert sel.criterion == "bic"
+    for latent_dim, score, seed in sel.trace:
+        assert latent_dim in (1, 2)
+        assert isinstance(score, float)
+        assert isinstance(seed, int)
+
+
+def test_invalid_criterion_raises():
+    with pytest.raises(ValueError, match="criterion must be"):
+        Selector(_toy_data()).fit(k=[1], its=5, repeats=1, gpu=False, criterion="cv")
 
 
 def test_keep_all_retains_candidates():

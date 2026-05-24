@@ -45,6 +45,14 @@ def test_int_input_is_accepted():
     assert isinstance(model.aic(), float)
 
 
+def test_bic_after_fit():
+    data = _toy_data()
+    model = Model(data, latent_dim=2).fit(its=20, seed=0, gpu=False)
+    n = data.shape[0]
+    expected = np.log(n) * model.total_params - 2 * model.log_likelihood()
+    assert model.bic() == pytest.approx(expected)
+
+
 def test_log_likelihood_before_fit_raises():
     model = Model(_toy_data(), latent_dim=2)
     with pytest.raises(ValueError):
