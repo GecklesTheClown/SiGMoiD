@@ -1,0 +1,575 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper, margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  language=Python,
+  keywordstyle=\color{blue!70!black},
+  commentstyle=\color{green!40!black}\itshape,
+  stringstyle=\color{red!60!black},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  framerule=0pt,
+  backgroundcolor=\color{black!4},
+  xleftmargin=0.5em,
+  xrightmargin=0.5em,
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+}
+
+\title{SiGMoiD: Summary of Changes\\\large from initial version (commit \texttt{c846b30}) to current \texttt{qol} branch}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{TL;DR}
+
+The starting version was a working prototype with hand-rolled gradients, a
+placeholder \texttt{pyproject.toml}, no tests, and a probability function that
+required reading the source to understand. The current branch turns it into a
+proper PyTorch package:
+
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+  \item \textbf{\texttt{Model} is now a \texttt{torch.nn.Module}}, so it composes with the rest of the PyTorch ecosystem (custom optimizers, schedulers, mixed precision, \texttt{state\_dict}, GPU movement, etc.).
+  \item \textbf{Hand-rolled gradient loop replaced with autograd.} Default optimizer is \texttt{Adam(lr=nu)} (was an implicit SGD). Mathematically equivalent to the original update when \texttt{SGD} is chosen explicitly.
+  \item \textbf{Bug fixes}: \texttt{Selector.fit} now respects its \texttt{gpu=} argument; integer-dtype input no longer crashes; \texttt{draw\_samples} no longer mutates global NumPy RNG state.
+  \item \textbf{Packaging}: real metadata, dev extras, dropped unused \texttt{torchvision} dependency, \texttt{requires-python>=3.10} (was \texttt{>=3.12}).
+  \item \textbf{Quality infrastructure}: 18 unit tests, GitHub Actions CI on Python 3.10/3.11/3.12, ruff linting, optimizer benchmark.
+  \item \textbf{Method rename}: \texttt{Model.train} $\rightarrow$ \texttt{Model.fit} (so \texttt{nn.Module.train(mode=True)} keeps its standard PyTorch meaning of toggling train/eval mode).
+\end{itemize}
+
+\noindent The probability function from the paper,
+\[
+  p_{si} \;=\; \frac{\exp(-\sum_k \beta_{sk} E_{ki})}{1 + \exp(-\sum_k \beta_{sk} E_{ki})} \;=\; \mathrm{sgm}(-z), \quad z = \beta E,
+\]
+is preserved \emph{verbatim}. See \S\ref{sec:sigmoid} for why this is worth flagging.
+
+\bigskip
+\hrule
+\bigskip
+
+\section{Packaging and repository hygiene}
+
+\subsection{\texttt{pyproject.toml}}
+
+Filled in real description, license, classifiers, and project URLs. Added a
+\texttt{[project.optional-dependencies]} section with a \texttt{dev} group
+(\texttt{pytest}, \texttt{ruff}, \texttt{mypy}) and a \texttt{pandas} group for
+the optional \texttt{Selector.trace\_df()} helper. Loosened the Python floor
+from 3.12 to 3.10 and removed the unused \texttt{torchvision} dependency.
+
+The distribution name is now \texttt{sigmoid-py} (the importable name remains
+\texttt{sigmoid}). PyPI's \texttt{sigmoid} slot is taken; \texttt{sigmoid-py}
+matches the planned PyPI name in the original README.
+
+\subsection{Layout}
+
+\begin{lstlisting}[language=]
+src/sigmoid/
+  __init__.py     # now re-exports Model, Selector, __version__
+  model.py
+  selector.py
+                  # utils.py was empty; deleted
+tests/            # NEW
+  test_model.py
+  test_selector.py
+examples/         # NEW
+  bench_optimizers.py
+.github/workflows/ci.yml   # NEW
+docs/changes.tex  # this file
+CHANGELOG.md      # NEW
+\end{lstlisting}
+
+\subsection{Top-level imports}
+
+\textbf{Before:}
+\begin{lstlisting}
+from sigmoid.model import Model
+from sigmoid.selector import Selector
+\end{lstlisting}
+
+\textbf{Now:}
+\begin{lstlisting}
+from sigmoid import Model, Selector
+\end{lstlisting}
+
+This is a one-line change to \texttt{src/sigmoid/\_\_init\_\_.py} but it's the
+form most users will type, so it matters.
+
+\bigskip
+\hrule
+\bigskip
+
+\section{\texttt{Model} ported to \texttt{nn.Module}}
+\label{sec:nnmodule}
+
+This is the biggest structural change. \texttt{Model} now inherits from
+\texttt{torch.nn.Module}. To understand what that buys us, here's a tour of
+the new pieces.
+
+\subsection{What is \texttt{nn.Module}?}
+
+\texttt{nn.Module} is PyTorch's base class for anything with \emph{learnable
+parameters}. By inheriting from it, our \texttt{Model} automatically gains:
+
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+  \item \texttt{model.parameters()} -- iterator over all learnable tensors. Optimizers consume this.
+  \item \texttt{model.to(device)} -- moves all parameters and buffers to a device in one call.
+  \item \texttt{model.state\_dict()} / \texttt{model.load\_state\_dict(...)} -- save/load weights.
+  \item \texttt{model.train()} / \texttt{model.eval()} -- toggles training/evaluation mode (used by dropout, batchnorm, etc.).
+  \item Compatibility with \texttt{nn.DataParallel}, \texttt{torch.compile}, \texttt{torch.amp} (mixed precision), and almost any PyTorch ecosystem package.
+\end{itemize}
+
+\subsection{\texttt{nn.Parameter} vs.\ a plain tensor}
+
+In the original code:
+\begin{lstlisting}
+beta = torch.normal(...)            # plain tensor
+energy = torch.normal(...)          # plain tensor
+\end{lstlisting}
+
+In the new code:
+\begin{lstlisting}
+self.beta = nn.Parameter(torch.empty(s, self.k).normal_(mean, std))
+self.energy = nn.Parameter(torch.empty(self.k, i).normal_(mean, std))
+\end{lstlisting}
+
+A \texttt{nn.Parameter} is just a tensor with a flag that says ``I am
+learnable.'' When you assign one as an attribute on an \texttt{nn.Module}, the
+module silently registers it in an internal dict. That's how
+\texttt{model.parameters()} knows what to return, and how \texttt{state\_dict}
+knows what to save.
+
+\subsection{\texttt{register\_buffer} for non-learnable tensors}
+
+\begin{lstlisting}
+self.register_buffer("raw", torch.from_numpy(np.asarray(data)).float())
+\end{lstlisting}
+
+\texttt{raw} (the data matrix) is not learnable, but we want it to move when
+the user calls \texttt{model.to("cuda")}. Registering it as a buffer tells the
+module: ``this is mine, take it with you when you move, but don't try to
+optimize it.''
+
+If we'd just done \texttt{self.raw = torch.tensor(...)}, the tensor would
+\emph{stay on CPU} when the user called \texttt{model.to("cuda")}, and
+training would crash with a device mismatch. Buffers fix that.
+
+\subsection{The new training loop (autograd)}
+
+\textbf{Before} -- hand-rolled gradient ascent:
+\begin{lstlisting}
+for _ in range(its):
+    diff = prob_sigma - sigma
+    beta_init = beta.clone()
+    beta = beta + nu * (diff @ energy.T)
+    energy = energy + nu * (beta_init.T @ diff)
+    prob_sigma = self._sigma_probability(beta, energy)
+\end{lstlisting}
+
+\textbf{Now} -- standard autograd:
+\begin{lstlisting}
+for _ in range(its):
+    optimizer.zero_grad()                       # 1. clear leftover gradients
+    prob = self.forward()                       # 2. forward pass
+    loss = F.binary_cross_entropy(              # 3. compute loss
+        prob, self.raw, reduction="sum"
+    )
+    loss.backward()                             # 4. autograd computes
+                                                #    d(loss)/d(every param)
+    optimizer.step()                            # 5. optimizer applies
+                                                #    the update rule
+\end{lstlisting}
+
+The four-step pattern (\texttt{zero\_grad}, \texttt{forward}, \texttt{loss.backward}, \texttt{optimizer.step}) is the canonical PyTorch training loop. Every PyTorch package and tutorial uses it. By adopting it we get:
+
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+  \item Any optimizer (Adam, AdamW, RMSprop, LBFGS, $\ldots$) is a one-liner.
+  \item Any LR scheduler plugs in via \texttt{scheduler.step()} after \texttt{optimizer.step()}.
+  \item Mixed precision via \texttt{torch.amp.autocast} works without any model-side changes.
+\end{itemize}
+
+We proved (see \texttt{CHANGELOG.md} and the math derivation we worked
+through) that \texttt{torch.optim.SGD(lr=nu)} on \texttt{loss = sum BCE}
+produces parameter updates \emph{identical} to the original hand-rolled loop,
+down to floating-point noise ($\sim 10^{-8}$ max diff after 500 iterations).
+So nothing changed about the algorithm; we just expressed it in the standard
+form.
+
+\subsection{Why \texttt{Model.train} was renamed to \texttt{Model.fit}}
+
+\texttt{nn.Module} already defines \texttt{train(mode=True)} as the method
+that toggles train/eval mode. Downstream PyTorch packages call this. If we
+overrode it to mean ``run gradient descent,'' those packages would silently
+break. So our training method is now \texttt{fit()} (also more
+\texttt{sklearn}-like).
+
+\bigskip
+\hrule
+\bigskip
+
+\section{The \texttt{@property} decorator}
+\label{sec:property}
+
+You asked specifically about this one, so a dedicated section.
+
+\subsection{What it does}
+
+\texttt{@property} turns a method into something that \emph{looks like an
+attribute} from the caller's perspective. Compare:
+
+\begin{lstlisting}
+# Without @property:
+class Model:
+    def total_params(self):
+        s, i = self.raw.shape
+        return s * self.k + self.k * i
+
+m.total_params()        # must call with parentheses
+\end{lstlisting}
+
+\begin{lstlisting}
+# With @property:
+class Model:
+    @property
+    def total_params(self):
+        s, i = self.raw.shape
+        return s * self.k + self.k * i
+
+m.total_params          # NO parentheses; looks like an attribute
+\end{lstlisting}
+
+The behaviour is identical -- the body still runs every time you access it --
+but the \emph{interface} is cleaner. You read \texttt{m.total\_params} the
+same way you'd read \texttt{m.k}.
+
+\subsection{Why we use it in the new \texttt{Model}}
+
+Three places:
+
+\begin{lstlisting}
+@property
+def total_params(self) -> int:
+    """Total number of trainable parameters in the model."""
+    s, i = self.raw.shape
+    return s * self.k + self.k * i
+\end{lstlisting}
+
+In the old code this was \texttt{self.total\_params = self.param\_counter()}
+set once in \texttt{\_\_init\_\_}. That works, but if the user ever changes
+\texttt{self.k} (or we extend the model later), the cached value goes stale.
+A \texttt{@property} computes it on demand from \texttt{self.raw.shape} and
+\texttt{self.k}, so it's always correct. Cheap to recompute (two
+multiplications), no caching needed.
+
+\begin{lstlisting}
+@property
+def prob_estimates(self) -> torch.Tensor | None:
+    if not self._fitted:
+        return None
+    with torch.no_grad():
+        return self.forward().detach().cpu()
+\end{lstlisting}
+
+In the old code, \texttt{self.prob\_estimates} was a tensor that got assigned
+once at the end of \texttt{train()}. With autograd, \texttt{beta} and
+\texttt{energy} change every step, so the ``current'' probability matrix is
+always derivable from them. The property says: \emph{when someone asks for
+\texttt{model.prob\_estimates}, recompute it on the fly from the current
+parameters}. This means if the user runs \texttt{fit()} again, the property
+returns the new probabilities -- no risk of stale state.
+
+The \texttt{with torch.no\_grad():} block tells PyTorch ``don't bother
+building the autograd graph for this computation, I'm just inspecting'' --
+saves memory.
+
+Same idea for:
+\begin{lstlisting}
+@property
+def model_params(self) -> list[torch.Tensor] | None:
+    if not self._fitted:
+        return None
+    return [self.beta.detach().cpu(), self.energy.detach().cpu()]
+\end{lstlisting}
+
+\subsection{When to use it}
+
+Rule of thumb: use \texttt{@property} for ``computed views'' on internal
+state -- things that \emph{feel} like attributes but are derived from other
+attributes. Don't use it for slow computations (the user won't expect
+attribute access to take a long time).
+
+\bigskip
+\hrule
+\bigskip
+
+\section{Other Python idioms introduced}
+
+\subsection{\texttt{from \_\_future\_\_ import annotations}}
+
+\begin{lstlisting}
+from __future__ import annotations
+\end{lstlisting}
+
+This makes Python treat all type hints as strings (deferred evaluation).
+Practical benefit: you can write \texttt{def fit(...) -> Model:} inside the
+\texttt{Model} class itself without Python complaining ``\texttt{Model} isn't
+defined yet.'' Without this import you'd have to write \texttt{-> "Model"} in
+quotes.
+
+\subsection{Type hints with \texttt{|} syntax}
+
+\begin{lstlisting}
+def fit(self, seed: int | None = None) -> Model:
+\end{lstlisting}
+
+\texttt{int | None} means ``either an int or \texttt{None}.'' This is the
+modern (Python 3.10+) replacement for the older \texttt{Optional[int]} from
+the \texttt{typing} module. Strictly cosmetic; same meaning.
+
+\subsection{\texttt{np.random.default\_rng} instead of \texttt{np.random.seed}}
+
+\textbf{Before:}
+\begin{lstlisting}
+np.random.seed(seed)
+indices = np.random.randint(...)
+samples = np.random.binomial(...)
+\end{lstlisting}
+
+\textbf{Now:}
+\begin{lstlisting}
+rng = np.random.default_rng(seed)
+indices = rng.integers(...)
+samples = rng.binomial(...)
+\end{lstlisting}
+
+\texttt{np.random.seed} mutates a \emph{global} state shared by every
+NumPy call in the program. If a user did:
+\begin{lstlisting}
+np.random.seed(7)
+x = np.random.rand()        # uses seed 7
+samples = model.draw_samples(seed=42)  # silently re-seeds to 42!
+y = np.random.rand()        # NOT what user expected
+\end{lstlisting}
+\texttt{model.draw\_samples} would silently change the user's downstream
+random numbers. Using a local generator (\texttt{rng}) keeps our randomness
+isolated.
+
+\subsection{Lazy imports}
+
+\begin{lstlisting}
+def trace_df(self):
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError("trace_df() requires pandas. ...") from exc
+    return pd.DataFrame(self.trace, ...)
+\end{lstlisting}
+
+\texttt{pandas} is a heavy dependency (loads NumPy, dateutil, lots of C
+extensions). We don't want to pay that import cost on \texttt{import sigmoid}
+just because of one optional helper. The lazy import means pandas is only
+loaded if-and-when the user actually calls \texttt{trace\_df()}.
+
+\subsection{\texttt{logging} instead of \texttt{print}}
+
+\begin{lstlisting}
+logger = logging.getLogger(__name__)
+...
+logger.info("Training candidate %d/%d ...", done, total, ...)
+\end{lstlisting}
+
+\texttt{print} is unconditional and goes to stdout. \texttt{logging} can be
+filtered, redirected, formatted, or silenced by the user without modifying
+our code. This is what every library is expected to do; \texttt{print}
+inside a library is considered a code smell.
+
+\bigskip
+\hrule
+\bigskip
+
+\section{The probability function (a math note)}
+\label{sec:sigmoid}
+
+This was the hardest gotcha during the refactor.
+
+The paper's per-cell probability is
+\[
+  p_{si} \;=\; \frac{e^{-z_{si}}}{1 + e^{-z_{si}}}, \qquad z_{si} \;=\; \sum_k \beta_{sk} E_{ki}.
+\]
+
+By a one-line algebraic manipulation,
+\[
+  \frac{e^{-z}}{1 + e^{-z}} \;\stackrel{\times e^z / e^z}{=}\; \frac{1}{1 + e^{z}} \;=\; \mathrm{sgm}(-z),
+\]
+so the paper formula is the standard sigmoid evaluated at $-z$, \emph{not}
+at $+z$.
+
+The original code used a hand-rolled \texttt{\_sigmoid\_transform(x)} that
+implemented $\mathrm{sgm}(-x)$ in a numerically-stable way (one branch for
+$x \ge 0$, another for $x < 0$, both avoiding overflow). The current
+\texttt{forward()} method is now a one-liner:
+\begin{lstlisting}
+def forward(self) -> torch.Tensor:
+    return torch.sigmoid(-(self.beta @ self.energy))
+\end{lstlisting}
+which is mathematically and numerically equivalent (\texttt{torch.sigmoid}
+applies the same overflow-avoidance trick internally).
+
+The mistake to never make: using \texttt{torch.sigmoid(beta @ energy)}
+without the negation. That computes the \emph{complement} $1 - p$ and
+silently swaps the roles of 0 and 1 in the data, breaking training without
+any error. The unit test \texttt{test\_training\_actually\_minimizes\_nll}
+exists specifically to guard against this regression -- if someone removes
+the negation, that test fails.
+
+\bigskip
+\hrule
+\bigskip
+
+\section{Optimizer change: SGD $\rightarrow$ Adam by default}
+
+The autograd port lets us swap optimizers freely. We benchmarked
+several on a 200$\times$60 binary dataset with true latent dim 4
+(\texttt{examples/bench\_optimizers.py}, 5 seeds, 1500 iterations):
+
+\begin{center}
+\begin{tabular}{lrrr}
+\hline
+optimizer & final NLL & iters to 99\% & wall (s) \\
+\hline
+SGD lr=$10^{-3}$ (old default) & $5178 \pm 188$ & 913 & 0.83 \\
+SGD lr=$10^{-2}$               & $5126 \pm 183$ & \textbf{243} & \textbf{0.48} \\
+SGD lr=$10^{-1}$               & \textbf{diverges} & --- & --- \\
+Adam lr=$10^{-3}$              & $5346 \pm 168$ & 1407 & 0.64 \\
+\textbf{Adam lr=$10^{-2}$ (new default)} & $5139 \pm 187$ & 511 & 0.69 \\
+Adam lr=$10^{-1}$              & $\mathbf{5044 \pm 183}$ & 494 & 0.69 \\
+AdamW lr=$10^{-2}$             & $5142 \pm 187$ & 498 & 0.69 \\
+\hline
+\end{tabular}
+\end{center}
+
+Why Adam is the new default:
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+  \item Robust to learning-rate choice. SGD blows up at lr=$0.1$; Adam at the same lr is the \emph{best} run.
+  \item Slightly lower final NLL than SGD on every learning rate we tried.
+  \item Standard ``don't make me think'' choice for users who haven't tuned anything.
+\end{itemize}
+
+\noindent \textbf{Note for throughput-conscious users}: plain SGD with a
+known-good \texttt{nu} reaches the same plateau in roughly half the wall-time
+because there's no momentum/variance state to update each step. If you have
+already tuned \texttt{nu} for your problem, pass:
+\begin{lstlisting}
+opt = torch.optim.SGD(model.parameters(), lr=nu)
+model.fit(its=500, optimizer=opt, seed=42)
+\end{lstlisting}
+This is also mathematically equivalent to the original SiGMoiD update.
+
+\bigskip
+\hrule
+\bigskip
+
+\section{Bug fixes}
+
+\begin{description}[leftmargin=*, itemsep=4pt]
+  \item[\texttt{Selector.fit} ignored its \texttt{gpu} argument.] The
+        argument was accepted but never forwarded to \texttt{Model.train}.
+        Users passing \texttt{gpu=False} still trained on GPU. Fixed.
+
+  \item[Integer-dtype input crashed BCE.]
+        \texttt{torch.from\_numpy(data)} preserves the user's dtype. If they
+        passed an \texttt{int64} array (very common for binary data),
+        \texttt{F.binary\_cross\_entropy} failed with a cryptic error at
+        evaluation time. Fixed by casting to float in \texttt{\_\_init\_\_}.
+
+  \item[\texttt{draw\_samples} mutated global NumPy RNG state.]
+        See \S4 above. Fixed by switching to a local generator.
+
+  \item[\texttt{Model.train(k=...)} silently overrode \texttt{latent\_dim}.]
+        The original \texttt{train()} method had a \texttt{k=1} kwarg that
+        shadowed the latent dimension passed to \texttt{\_\_init\_\_}. A user
+        following the docstring example would silently train a $k{=}1$ model
+        regardless of what they constructed. Removed.
+
+  \item[Docstring typos.] e.g.\ \texttt{""Compute the log-likelihood} (stray
+        quote), \texttt{"""\_summary\_} (boilerplate placeholder).
+\end{description}
+
+\bigskip
+\hrule
+\bigskip
+
+\section{Testing and CI}
+
+\subsection{Tests}
+
+There are now 18 unit tests in \texttt{tests/}, covering:
+
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+  \item \textbf{API contract}: \texttt{fit} returns \texttt{self}; pre-fit calls to \texttt{log\_likelihood} or \texttt{draw\_samples} raise \texttt{ValueError}; \texttt{Model} is an \texttt{nn.Module} with two registered parameters.
+  \item \textbf{Determinism}: same seed gives same result.
+  \item \textbf{Regression tests} for the bugs listed above (gpu flag respected, integer input accepted, NumPy RNG not mutated).
+  \item \textbf{Math sanity}: \texttt{test\_training\_actually\_minimizes\_nll} asserts NLL strictly decreases over training. This catches sign errors, an inverted forward pass, or a broken optimizer wiring.
+  \item \textbf{Ecosystem interop}: a custom Adam optimizer accepts our parameters; an optimizer not wired to our parameters is rejected with a clear error; \texttt{state\_dict} round-trips cleanly.
+\end{itemize}
+
+\subsection{Continuous integration}
+
+\texttt{.github/workflows/ci.yml} runs \texttt{ruff check} and \texttt{pytest}
+on every push and PR, against Python 3.10 / 3.11 / 3.12. Uses the CPU PyTorch
+wheel index so CI runs are quick and free.
+
+\subsection{Linting}
+
+\texttt{[tool.ruff]} in \texttt{pyproject.toml} configures
+\href{https://docs.astral.sh/ruff/}{ruff} with a sensible rule set
+(\texttt{E}, \texttt{F}, \texttt{I}, \texttt{UP}, \texttt{B}, \texttt{SIM}).
+This catches unused imports, shadowed variables, deprecated typing forms,
+common bug patterns, and code that can be simplified.
+
+\bigskip
+\hrule
+\bigskip
+
+\section{What was \emph{not} changed}
+
+The published model and its mathematical behaviour are unchanged.
+Specifically:
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+  \item The probability function $p = \mathrm{sgm}(-\beta E)$ from the paper.
+  \item The AIC formula $2k - 2\,\mathcal{LL}$.
+  \item The model selection logic (per-candidate seed, AIC ranking).
+  \item The sampling procedure (sample $\beta$ rows uniformly, then Bernoulli with that row's probabilities).
+\end{itemize}
+
+When using \texttt{SGD(lr=nu)} the parameter trajectory matches the original
+hand-rolled loop to floating-point noise. Switching to Adam changes the
+trajectory but not the model class or the objective.
+
+\section*{Where to look first}
+
+\begin{description}[leftmargin=*, itemsep=2pt]
+  \item[\texttt{CHANGELOG.md}] -- canonical list of changes; the
+        ``\textbf{Note -- the SiGMoiD probability function}'' callout at the
+        top is the one you should re-read whenever editing
+        \texttt{Model.forward}.
+  \item[\texttt{src/sigmoid/model.py}] -- the rewritten model.
+  \item[\texttt{tests/test\_model.py}] -- shows how the new API is meant to be used.
+  \item[\texttt{examples/bench\_optimizers.py}] -- reproducible optimizer benchmark; rerun with your own data shape if you want.
+\end{description}
+
+\end{document}

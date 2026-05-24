@@ -106,26 +106,6 @@ hand-rolled SiGMoiD update (down to floating-point noise). You can still pass a
 custom pre-built optimizer instance for full control (momentum, weight decay,
 schedulers, etc.).
 
-### Optional CUDA speed-ups (`bf16`, `torch.compile`)
-
-For large fits on a recent NVIDIA GPU, you can opt into bfloat16 autocast and/or
-`torch.compile` without changing defaults for everyone else:
-
-```python
-# bf16: faster matmuls; weights/optimizer stay float32
-model.fit(its=2000, gpu=True, bf16=True, seed=42)
-
-# torch.compile: fuses the forward graph (warmup on first steps)
-model.fit(its=2000, gpu=True, compile_model=True, seed=42)
-
-# Stiefel + geoopt: same flags; retractions stay full precision
-model = Model(data, latent_dim=5, energy_manifold="stiefel")
-model.fit(its=2000, gpu=True, bf16=True, compile_model=True, seed=42)
-```
-
-`bf16=True` is ignored on CPU (with a warning). `Selector.fit` accepts the
-same `bf16` and `compile_model` keyword arguments.
-
 ## Constrained parameter learning (Stiefel manifold)
 
 The `beta @ E` factorization has a rotational gauge ambiguity: any invertible

@@ -36,8 +36,6 @@ dev = [
 ]
 pandas = ["pandas>=2.0"]
 geometry = ["geoopt>=0.5"]
-# Triton has no Windows wheels; install on Linux for torch.compile (e.g. A6000 box).
-compile = ["triton>=3.0; sys_platform == 'linux'"]
 
 [project.urls]
 Homepage = "https://github.com/GecklesTheClown/SiGMoiD"

@@ -76,8 +76,6 @@ class Selector:
         verbose: bool = False,
         keep_all: bool = False,
         criterion: str = "aic",
-        bf16: bool = False,
-        compile_model: bool = False,
     ) -> Selector:
         """Fit candidate models across latent dimensions and select the best by AIC or BIC.
 
@@ -91,8 +89,6 @@ class Selector:
                 If False (default), only the running best is kept to save memory.
             criterion: Model selection criterion, either ``"aic"`` or ``"bic"``.
                 Defaults to ``"aic"``.
-            bf16: Passed through to :meth:`Model.fit` (CUDA bfloat16 autocast).
-            compile_model: Passed through to :meth:`Model.fit` (:func:`torch.compile`).
 
         Returns:
             self, for chaining.
@@ -127,13 +123,7 @@ class Selector:
                     )
 
                 candidate = Model(self.raw, latent_dim=int(latent_dim))
-                candidate.fit(
-                    seed=seed,
-                    its=its,
-                    gpu=gpu,
-                    bf16=bf16,
-                    compile_model=compile_model,
-                )
+                candidate.fit(seed=seed, its=its, gpu=gpu)
                 candidate_score = getattr(candidate, criterion)()
                 self.trace.append((int(latent_dim), candidate_score, seed))
 
