@@ -58,6 +58,47 @@ def _require_geoopt(feature: str) -> None:
         )
 
 
+def _resolve_bf16(device: torch.device, bf16: bool) -> bool:
+    """Decide whether to enable bfloat16 autocast for this fit call."""
+    if not bf16:
+        return False
+    if device.type != "cuda":
+        warnings.warn(
+            "bf16=True has no effect on CPU; training runs in float32. "
+            "Pass gpu=True on a CUDA-capable machine to use bfloat16.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return False
+    if not torch.cuda.is_bf16_supported():
+        warnings.warn(
+            "bf16=True but this CUDA device does not support bfloat16; "
+            "training runs in float32.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return False
+    return True
+
+
+def _maybe_compile_forward(
+    forward: object, compile_model: bool
+) -> object:
+    """Return ``torch.compile(forward)`` when requested and available."""
+    if not compile_model:
+        return forward
+    compile_fn = getattr(torch, "compile", None)
+    if compile_fn is None:
+        warnings.warn(
+            "compile_model=True but torch.compile is not available in this "
+            "PyTorch build; using eager forward.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return forward
+    return compile_fn(forward)  # type: ignore[no-any-return]
+
+
 class Model(nn.Module):
     """SiGMoiD model for binary data, implemented as an :class:`nn.Module`.
 
@@ -258,6 +299,8 @@ class Model(nn.Module):
         optimizer: torch.optim.Optimizer | None = None,
         track_loss: bool = False,
         verbose: bool = False,
+        bf16: bool = False,
+        compile_model: bool = False,
     ) -> Model:
         """Fit the model by minimizing the summed binary cross-entropy.
 
@@ -288,6 +331,15 @@ class Model(nn.Module):
             track_loss: If True, append the NLL of every iteration to
                 ``self.loss_history``.
             verbose: If True, log progress roughly every 10% of iterations.
+            bf16: If True, run the forward pass and loss under CUDA bfloat16
+                autocast (parameters and optimizer steps stay in float32).
+                Ignored on CPU or when the GPU lacks bf16 support (with a
+                warning). Safe to combine with ``beta_manifold="stiefel"``;
+                geoopt retractions still run in full precision.
+            compile_model: If True, wrap :meth:`forward` with
+                :func:`torch.compile` for the duration of this fit call only.
+                Off by default because compile warmup and geoopt manifold
+                ops can add overhead on small problems.
 
         Returns:
             self, to allow chaining.
@@ -301,14 +353,38 @@ class Model(nn.Module):
         else:
             self._validate_user_optimizer(optimizer)
 
+        use_bf16 = _resolve_bf16(device, bf16)
+        forward_fn = _maybe_compile_forward(self.forward, compile_model)
+        using_compiled_forward = compile_model and forward_fn is not self.forward
+
         sigma = self.raw
         self.loss_history = []
         log_every = max(1, its // 10) if verbose else 0
 
+        def _forward_and_loss() -> torch.Tensor:
+            if use_bf16:
+                with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    prob = forward_fn()
+                    return F.binary_cross_entropy(prob, sigma, reduction="sum")
+            prob = forward_fn()
+            return F.binary_cross_entropy(prob, sigma, reduction="sum")
+
         for it in range(its):
             optimizer.zero_grad()
-            prob = self.forward()
-            loss = F.binary_cross_entropy(prob, sigma, reduction="sum")
+            try:
+                loss = _forward_and_loss()
+            except Exception as exc:
+                if not using_compiled_forward:
+                    raise
+                warnings.warn(
+                    f"torch.compile failed ({exc!r}); falling back to eager "
+                    "forward for the remainder of this fit.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                forward_fn = self.forward
+                using_compiled_forward = False
+                loss = _forward_and_loss()
             loss.backward()
             optimizer.step()
 

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — optional CUDA bf16 and `torch.compile` in `Model.fit`
+
+- `Model.fit(..., bf16=True)` runs the forward pass and BCE loss under CUDA
+  bfloat16 autocast; parameters and optimizer steps stay in float32. Off by
+  default. On CPU or unsupported GPUs, training falls back to float32 with a
+  warning. Works with `beta_manifold="stiefel"` (geoopt retractions remain
+  full precision).
+- `Model.fit(..., compile_model=True)` wraps `forward` with `torch.compile`
+  for that fit call only. Off by default.
+- `Selector.fit` forwards `bf16` and `compile_model` to each candidate.
+- Tests in `tests/test_perf_opts.py`.
+
 ### Added — Stiefel-manifold constraint on `beta` (optional)
 
 `Model(..., beta_manifold="stiefel")` constrains the sample-side latent matrix
