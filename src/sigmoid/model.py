@@ -17,9 +17,9 @@ Example:
     # Default optimizer is Adam with lr=nu (nu defaults to 1e-2)
     model = Model(data, latent_dim=5).fit(its=1000, seed=42)
 
-    # Constrain energy to the Stiefel manifold (orthonormal rows in feature space).
-    # Requires the optional `geoopt` dependency.
-    model = Model(data, latent_dim=5, energy_manifold="stiefel").fit(its=500, seed=42)
+    # Constrain energy so E E^T = I_k. Use "orthogonal" for PyTorch's built-in
+    # parametrization or "stiefel" for the full geoopt manifold path.
+    model = Model(data, latent_dim=5, energy_manifold="orthogonal").fit(its=500, seed=42)
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.parametrizations import orthogonal as orthogonal_parametrization
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ except ImportError:  # pragma: no cover - covered by tests that skip
     _HAS_GEOOPT = False
 
 
-_SUPPORTED_MANIFOLDS = ("stiefel",)
+_SUPPORTED_MANIFOLDS = ("stiefel", "orthogonal")
 _SUPPORTED_OPTIMIZERS = ("adam", "sgd")
 
 
@@ -71,7 +72,9 @@ class Model(nn.Module):
         Dimensionality of the latent space (``k``).
     mean, std : float
         Mean and standard deviation used to initialize ``beta`` and ``energy``.
-    energy_manifold : {None, "stiefel"}, optional
+    energy_manifold : {None, "stiefel", "orthogonal"}, optional
+        Constraint applied to the feature-side energy matrix.
+
         If ``"stiefel"``, constrain the feature-side energy matrix
         :math:`E \\in \\mathbb{R}^{k \\times i}` to have orthonormal rows
         (:math:`E E^\\top = I_k`). Internally stored as ``energy_T`` with shape
@@ -79,6 +82,11 @@ class Model(nn.Module):
         (:math:`E^\\top E = I_k` after transpose). Requires ``features >= k``
         and the optional ``geoopt`` dependency. Removes rotational ambiguity
         in the ``beta @ E`` factorization without losing expressivity.
+
+        If ``"orthogonal"``, apply PyTorch's built-in orthogonal
+        parametrization to ``energy_T`` with the same ``(features, k)``
+        storage, so that ``E = energy_T.T`` still satisfies ``E E^T = I_k``
+        while using plain Euclidean optimizers.
 
     Attributes
     ----------
@@ -90,9 +98,11 @@ class Model(nn.Module):
         Sample-side latent matrix of shape ``(samples, k)``.
     energy : nn.Parameter
         Feature-side matrix of shape ``(k, features)`` when unconstrained.
-    energy_T : geoopt.ManifoldParameter
-        Present when ``energy_manifold="stiefel"``; shape ``(features, k)``.
-        Use :meth:`energy_matrix` for the paper-shaped ``(k, features)`` view.
+    energy_T : torch.Tensor
+        Present when ``energy_manifold`` is constrained; shape ``(features, k)``.
+        Under ``"stiefel"`` it is a geoopt manifold parameter; under
+        ``"orthogonal"`` it is a PyTorch-parametrized tensor. Use
+        :meth:`energy_matrix` for the paper-shaped ``(k, features)`` view.
     loss_history : list[float]
         Per-iteration NLL recorded when ``fit(track_loss=True)``.
     """
@@ -111,7 +121,7 @@ class Model(nn.Module):
         if beta_manifold is not None:
             raise ValueError(
                 "beta_manifold was removed. Constrain the feature-side energy "
-                "matrix with energy_manifold='stiefel' instead."
+                "matrix with energy_manifold='stiefel' or 'orthogonal' instead."
             )
         self.register_buffer("raw", torch.from_numpy(np.asarray(data)).float())
         self.k = int(latent_dim)
@@ -140,6 +150,14 @@ class Model(nn.Module):
             )
             with torch.no_grad():
                 self.energy_T.proj_()
+        elif energy_manifold == "orthogonal":
+            if i < self.k:
+                raise ValueError(
+                    f"Orthogonal energy constraint requires features >= latent_dim "
+                    f"(got features={i}, latent_dim={self.k})."
+                )
+            self.energy_T = nn.Parameter(torch.empty(i, self.k).normal_(mean, std))
+            orthogonal_parametrization(self, "energy_T")
         else:
             self.energy = nn.Parameter(torch.empty(self.k, i).normal_(mean, std))
 
@@ -153,10 +171,10 @@ class Model(nn.Module):
     def energy_matrix(self) -> torch.Tensor:
         """Energy matrix ``E`` with shape ``(k, features)`` for the forward pass.
 
-        When ``energy_manifold="stiefel"``, returns ``energy_T.T`` so that
+        When the energy is constrained, returns ``energy_T.T`` so that
         ``beta @ E`` matches the paper notation.
         """
-        if self.energy_manifold == "stiefel":
+        if self.energy_manifold is not None:
             return self.energy_T.t()
         return self.energy
 
@@ -164,12 +182,13 @@ class Model(nn.Module):
     def total_params(self) -> int:
         """Effective number of free parameters (used in AIC and BIC).
 
-        Unconstrained: ``s*k + k*i``. With ``energy_manifold="stiefel"``, the
-        energy term uses ``k*i - k*(k+1)/2`` (see Edelman et al. 1998).
+        Unconstrained: ``s*k + k*i``. With constrained energy
+        (``"stiefel"`` or ``"orthogonal"``), the energy term uses
+        ``k*i - k*(k+1)/2`` (see Edelman et al. 1998).
         """
         s, i = self.raw.shape
         beta_dof = s * self.k
-        if self.energy_manifold == "stiefel":
+        if self.energy_manifold is not None:
             energy_dof = i * self.k - self.k * (self.k + 1) // 2
         else:
             energy_dof = self.k * i
@@ -225,6 +244,14 @@ class Model(nn.Module):
                 assert _HAS_GEOOPT
                 self.energy_T.normal_(self._init_mean, self._init_std)
                 self.energy_T.proj_()
+            elif self.energy_manifold == "orthogonal":
+                new_energy_t, _ = torch.linalg.qr(
+                    torch.empty_like(self.energy_T).normal_(
+                        self._init_mean, self._init_std
+                    ),
+                    mode="reduced",
+                )
+                self.energy_T = new_energy_t
             else:
                 self.energy.normal_(self._init_mean, self._init_std)
 
@@ -236,14 +263,15 @@ class Model(nn.Module):
         Args:
             nu: Learning rate.
             name: ``"adam"`` or ``"sgd"``. For Stiefel ``energy``, uses the
-                corresponding geoopt Riemannian optimizer.
+                corresponding geoopt Riemannian optimizer; the orthogonal
+                parametrization uses plain PyTorch optimizers.
         """
         key = name.lower()
         if key not in _SUPPORTED_OPTIMIZERS:
             raise ValueError(
                 f"optimizer must be one of {_SUPPORTED_OPTIMIZERS!r}, got {name!r}"
             )
-        if self.energy_manifold is not None:
+        if self.energy_manifold == "stiefel":
             _require_geoopt("default optimizer for manifold-constrained energy")
             # Riemannian optimizers handle mixed Euclidean + manifold params:
             # retraction on ManifoldParameters, standard step on nn.Parameters.
@@ -264,9 +292,9 @@ class Model(nn.Module):
                     "Build it after constructing the Model: "
                     "`opt = MyOpt(model.parameters(), ...)`."
                 )
-        # If energy lives on a manifold, a non-Riemannian optimizer will drift.
+        # Only the geoopt-backed Stiefel path needs a Riemannian optimizer.
         if (
-            self.energy_manifold is not None
+            self.energy_manifold == "stiefel"
             and _HAS_GEOOPT
             and not isinstance(optimizer, _GeooptOptimMixin)
         ):
@@ -316,6 +344,9 @@ class Model(nn.Module):
                   :class:`torch.optim.SGD` (``lr=nu``). Adam is more robust to
                   ``nu``; SGD is ~2x faster per iteration and matches the
                   original hand-rolled SiGMoiD update when ``nu`` is tuned.
+                * Orthogonally-parametrized ``energy_T``:
+                  :class:`torch.optim.Adam` or :class:`torch.optim.SGD`
+                  operating on PyTorch's built-in orthogonal parametrization.
                 * Stiefel-constrained ``energy_T``:
                   :class:`geoopt.optim.RiemannianAdam` or
                   :class:`geoopt.optim.RiemannianSGD`. ``AdamW`` is not

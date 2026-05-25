@@ -126,7 +126,12 @@ Usage:
 ```python
 from sigmoid import Model
 
-# energy_T is Stiefel-constrained; beta stays Euclidean.
+# Built-in PyTorch orthogonal parametrization:
+# E = energy_T.T satisfies E E^T = I_k, while beta stays Euclidean.
+model = Model(data, latent_dim=5, energy_manifold="orthogonal")
+model.fit(its=500, optimizer="adam", nu=1e-2, seed=42)
+
+# Full geoopt Stiefel manifold:
 # Default optimizer switches to geoopt.optim.RiemannianAdam.
 model = Model(data, latent_dim=5, energy_manifold="stiefel")
 model.fit(its=500, nu=5e-2, seed=42)
@@ -138,11 +143,13 @@ model.fit(its=500, nu=5e-2, seed=42)
 Notes:
 
 - Requires `features >= latent_dim`.
+- `energy_manifold="orthogonal"` uses PyTorch's built-in orthogonal
+  parametrization and works with ordinary `torch.optim.Adam` / `SGD`.
 - Use `geoopt.optim.RiemannianAdam` or `RiemannianSGD`. Supplying a plain
-  `torch.optim.Adam`/`SGD` raises a `RuntimeWarning` — the step is Euclidean,
-  so the constraint drifts.
-- **Do not** use `AdamW` with manifold parameters: its decoupled weight decay
-  shrinks towards zero, leaving the manifold.
+  `torch.optim.Adam`/`SGD` with `energy_manifold="stiefel"` raises a
+  `RuntimeWarning` — the step is Euclidean, so the constraint drifts.
+- **Do not** use `AdamW` with `energy_manifold="stiefel"`: its decoupled weight
+  decay shrinks towards zero, leaving the manifold.
 
 ## Model Selection
 

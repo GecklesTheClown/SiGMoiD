@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — PyTorch orthogonal constraint option for `energy`
+
+- `Model(..., energy_manifold="orthogonal")` applies PyTorch's built-in
+  orthogonal parametrization to `energy_T`, so `E = energy_T.T` satisfies
+  `E Eᵀ = I_k` without requiring `geoopt`.
+- The orthogonal option uses ordinary `torch.optim.Adam` / `SGD` rather than
+  Riemannian optimizers.
+- `Model.total_params` uses the same reduced energy degrees of freedom as the
+  Stiefel path: `k·i − k(k+1)/2`.
+- New tests in `tests/test_orthogonal.py`.
+
 ### Changed — Stiefel constraint moved from `beta` to `energy`
 
 `Model(..., energy_manifold="stiefel")` constrains the feature-side energy
